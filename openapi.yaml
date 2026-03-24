@@ -1,0 +1,2554 @@
+openapi: 3.0.3
+info:
+  title: Modern Relationship Knowledge Graph API
+  version: 0.1.0
+  description: |
+    现代人物关系图谱系统后端接口文档。
+
+    范围包含：
+    - Graph Module
+    - Query Module
+    - Version Module
+    - AI 边界接口
+
+    不包含 AI 内部编排实现细节，仅定义后端对 AI 结果的接入边界。
+
+    补充说明：
+    - 一个任务可关联多个上传文档
+    - 任务结果必须先经后端校验和标准化，再允许入图
+    - Neo4j 保存最终图结构，PostgreSQL 保存任务、版本、来源、证据和历史记录
+    - 节点类型与关系类型均采用可扩展字符串，不在接口层写死
+
+servers:
+  - url: /api
+    description: API Gateway
+
+tags:
+  - name: Graph
+    description: 节点、关系、图谱视图
+  - name: Query
+    description: 关系查询、路径查询、子图查询
+  - name: Version
+    description: 版本快照与回滚
+  - name: Task
+    description: 文档任务中心
+  - name: AI
+    description: 内部 AI 边界接口，不作为前端主流程入口
+
+paths:
+  /tasks:
+    post:
+      tags: [Task]
+      summary: 创建文档解析任务
+      description: |
+        一个任务可关联多个上传文档。
+        任务是文档解析、AI 处理、结果校验、结果应用的统一载体。
+      operationId: createDocumentTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 新创建的任务对象。
+                        $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Task]
+      summary: 获取任务列表
+      description: |
+        查询指定图谱下的任务列表。
+        用于前端任务中心、任务历史列表、筛选页和批量查看处理状态的场景。
+        该接口只返回任务级摘要信息，不返回完整结构化结果；若要查看具体解析结果，应继续调用 `/tasks/{taskId}/result`。
+      operationId: listTasks
+      parameters:
+        - $ref: '#/components/parameters/GraphIdQuery'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/TaskStatus'
+        - name: sourceType
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [document, text, news, social, story, custom]
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 任务列表分页结果。
+                        $ref: '#/components/schemas/TaskListResponse'
+
+  /tasks/{taskId}:
+    get:
+      tags: [Task]
+      summary: 获取任务详情
+      description: |
+        查询单个任务的完整元信息。
+        返回任务标题、来源类型、文件信息、状态、统计摘要、当前关联版本、错误信息等内容。
+        用于任务详情页、任务状态面板和前端轮询状态更新。
+      operationId: getTaskDetail
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 任务详情。
+                        $ref: '#/components/schemas/Task'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /tasks/{taskId}/result:
+    get:
+      tags: [Task]
+      summary: 获取任务结构化结果
+      description: |
+        查询任务经 AI 解析并经过后端校验、标准化后的结构化结果。
+        返回节点、关系、事件等标准 JSON 数据，用于前端预览“即将入图”的内容。
+        该接口通常在任务进入 `validated` 或 `applied` 状态后调用。
+      operationId: getTaskResult
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 任务结构化结果。
+                        $ref: '#/components/schemas/TaskResultResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /tasks/{taskId}/apply:
+    post:
+      tags: [Task]
+      summary: 应用任务结果入图
+      description: |
+        将已经完成校验的任务结果正式写入图数据库，并按需生成图谱版本快照。
+        前端正式入图应统一走该接口。
+      operationId: applyTaskResult
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyTaskRequest'
+      responses:
+        '200':
+          description: 应用成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 应用任务结果后的状态与版本信息。
+                        $ref: '#/components/schemas/TaskApplyResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /tasks/{taskId}/events:
+    get:
+      tags: [Task]
+      summary: 获取任务处理事件流
+      description: |
+        查询任务处理过程中的事件流。
+        用于前端展示类似 AI 对话的处理进度时间线，例如“已上传”“已排队”“AI 处理中”“校验完成”“结果已应用”等阶段。
+        该接口返回的是过程记录，不返回最终图谱内容。
+      operationId: listTaskEvents
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 任务事件流。
+                        $ref: '#/components/schemas/TaskEventListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /graph/nodes:
+    post:
+      tags: [Graph]
+      summary: 创建节点
+      description: |
+        在图谱中创建一个通用节点。
+        当前典型节点包括人物、公司、组织、地点、事件，但接口本身支持未来扩展其他节点类型。
+        该接口通常由前端图谱编辑器手工添加节点时调用，也可用于任务结果应用后的后端内部写入。
+      operationId: createGraphNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNodeRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 新创建的节点对象。
+                        $ref: '#/components/schemas/GraphNode'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /graph/nodes/{id}:
+    patch:
+      tags: [Graph]
+      summary: 更新节点
+      description: |
+        更新指定节点的可编辑信息。
+        可修改节点名称、扩展属性、前端布局坐标，以及事件类节点的附加字段。
+        后端应在执行更新后记录节点变更历史，供审计和前端展示。
+      operationId: updateGraphNode
+      parameters:
+        - $ref: '#/components/parameters/NodeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateNodeRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 更新后的节点对象。
+                        $ref: '#/components/schemas/GraphNode'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Graph]
+      summary: 删除节点
+      description: |
+        删除指定节点。
+        删除时需要同时处理与该节点有关的关系，以及来源映射、证据映射等关联数据。
+        若删除的是事件类节点，还需要额外清理其参与关系和地点关系。
+      operationId: deleteGraphNode
+      parameters:
+        - $ref: '#/components/parameters/NodeId'
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        description: 节点删除结果。
+                        properties:
+                          deleted:
+                            type: boolean
+                            description: 是否删除成功。
+                            example: true
+                          id:
+                            type: string
+                            description: 被删除的节点 ID。
+                            example: person_1
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /graph/edges:
+    post:
+      tags: [Graph]
+      summary: 创建边关系
+      description: |
+        在两个节点之间创建一条关系。
+        关系类型采用开放字符串，适用于合作、冲突、上下级、爱情等任意业务语义。
+        该接口通常用于前端手工连线，也可用于任务结果应用后的后端内部写入。
+      operationId: createGraphEdge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEdgeRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 新创建的关系对象。
+                        $ref: '#/components/schemas/GraphEdge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /graph/edges/{id}:
+    patch:
+      tags: [Graph]
+      summary: 更新边关系
+      description: |
+        更新指定关系的语义或展示信息。
+        可修改关系类型、标签、权重、时间字段和扩展属性。
+        适用于前端人工修正关系语义或后端标准化后重写关系属性。
+      operationId: updateGraphEdge
+      parameters:
+        - $ref: '#/components/parameters/EdgeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEdgeRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 更新后的关系对象。
+                        $ref: '#/components/schemas/GraphEdge'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Graph]
+      summary: 删除边关系
+      description: |
+        删除指定关系。
+        删除后端应同步清理与该关系关联的来源记录映射和证据映射，保证关系解释链路不会残留无效数据。
+      operationId: deleteGraphEdge
+      parameters:
+        - $ref: '#/components/parameters/EdgeId'
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        description: 关系删除结果。
+                        properties:
+                          deleted:
+                            type: boolean
+                            description: 是否删除成功。
+                            example: true
+                          id:
+                            type: string
+                            description: 被删除的关系 ID。
+                            example: edge_1
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /graph/view:
+    get:
+      tags: [Graph]
+      summary: 获取图谱视图
+      description: |
+        获取当前图谱的整图视图。
+        返回前端渲染所需的节点、关系和版本摘要，用于首页图谱展示、刷新图谱和查看当前最新状态。
+        该接口面向“最终已入图”的数据，而不是任务预览数据。
+      operationId: getGraphView
+      parameters:
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 当前整图视图数据。
+                        $ref: '#/components/schemas/GraphView'
+
+  /graph/subgraph:
+    get:
+      tags: [Graph]
+      summary: 获取基础子图
+      description: |
+        从指定根节点出发按固定深度扩展，返回局部图结构。
+        用于前端聚焦局部关系时的图谱渲染，例如围绕某个节点展开邻接网络。
+        该接口偏基础图浏览，不包含人物详情、证据或历史等聚合信息。
+      operationId: getGraphSubgraph
+      parameters:
+        - $ref: '#/components/parameters/GraphIdQuery'
+        - name: rootId
+          in: query
+          required: true
+          schema:
+            type: string
+          example: person_1
+        - name: depth
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 2
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 基于根节点扩展出的子图结果。
+                        $ref: '#/components/schemas/SubgraphResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /query/nodes/{nodeId}/relations:
+    get:
+      tags: [Query]
+      summary: 查询节点关系
+      description: |
+        查询指定节点的直接关系集合及其邻接节点。
+        适用于任意节点类型，可用于前端点击节点后的关系侧栏展示，也可用于后端做局部关系分析。
+        该接口返回的是一跳邻接关系，不会展开多跳路径。
+      operationId: queryNodeRelations
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: 目标节点 ID。
+          schema:
+            type: string
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 节点直接关系列表。
+                        $ref: '#/components/schemas/RelationsResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /query/nodes/{nodeId}/detail:
+    get:
+      tags: [Query]
+      summary: 查询节点详情与证据内容
+      description: |
+        返回节点详情、关联关系、证据片段、来源标题和修改历史。
+        适用于任意节点类型；对人物节点通常表现为人物详情页。
+      operationId: queryNodeDetail
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: 目标节点 ID。
+          schema:
+            type: string
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 节点详情聚合结果。
+                        $ref: '#/components/schemas/NodeDetailResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /query/nodes/{nodeId}/sources:
+    get:
+      tags: [Query]
+      summary: 查询节点来源与证据
+      description: |
+        查询指定节点关联的来源记录和证据片段。
+        用于解释“这个节点是根据什么内容建立出来的”，适合做来源追溯、证据查看和人工复核。
+      operationId: queryNodeSources
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: 目标节点 ID。
+          schema:
+            type: string
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 节点来源与证据结果。
+                        $ref: '#/components/schemas/NodeSourcesResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /query/nodes/{nodeId}/history:
+    get:
+      tags: [Query]
+      summary: 查询节点修改历史
+      description: |
+        查询指定节点的历史变更记录。
+        返回创建、修改、删除等历史，用于前端展示编辑历史、审计记录和问题排查。
+      operationId: queryNodeHistory
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: 目标节点 ID。
+          schema:
+            type: string
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 节点历史记录结果。
+                        $ref: '#/components/schemas/NodeHistoryResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /query/edges/{edgeId}:
+    get:
+      tags: [Query]
+      summary: 查询关系详情
+      description: |
+        查询单条关系的完整详情。
+        返回关系本身、对应的来源记录和证据片段，用于解释“这条关系为什么存在”。
+      operationId: queryEdgeDetail
+      parameters:
+        - name: edgeId
+          in: path
+          required: true
+          description: 目标关系 ID。
+          schema:
+            type: string
+        - $ref: '#/components/parameters/GraphIdQuery'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 关系详情聚合结果。
+                        $ref: '#/components/schemas/EdgeDetailResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /query/search:
+    get:
+      tags: [Query]
+      summary: 搜索节点
+      description: |
+        按关键词搜索节点，并支持节点类型和来源类型过滤。
+        用于前端全局搜索框、节点选择器和图谱快速定位。
+        返回的是分页节点摘要，不直接返回完整关系网络。
+      operationId: searchNodes
+      parameters:
+        - $ref: '#/components/parameters/GraphIdQuery'
+        - name: keyword
+          in: query
+          required: true
+          description: 搜索关键词。
+          schema:
+            type: string
+        - name: nodeType
+          in: query
+          required: false
+          description: 节点类型过滤条件。
+          schema:
+            $ref: '#/components/schemas/GraphNodeType'
+        - name: sourceType
+          in: query
+          required: false
+          description: 来源类型过滤条件。
+          schema:
+            type: string
+            enum: [manual, task, import, ai]
+        - name: page
+          in: query
+          required: false
+          description: 当前页码。
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          description: 每页返回条数。
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 节点搜索结果。
+                        $ref: '#/components/schemas/NodeSearchResponse'
+
+  /query/path:
+    get:
+      tags: [Query]
+      summary: 查询路径
+      description: |
+        查询两个节点之间的关系路径。
+        支持最短路径或多路径策略，可用于发现人物之间、组织之间或事件之间的连接链路。
+        该接口返回的是图路径结构，不负责返回来源证据和历史记录。
+      operationId: queryPath
+      parameters:
+        - $ref: '#/components/parameters/GraphIdQuery'
+        - name: sourceId
+          in: query
+          required: true
+          description: 起点节点 ID。
+          schema:
+            type: string
+        - name: targetId
+          in: query
+          required: true
+          description: 终点节点 ID。
+          schema:
+            type: string
+        - name: maxDepth
+          in: query
+          required: false
+          description: 最大搜索深度。
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 4
+        - name: strategy
+          in: query
+          required: false
+          description: 路径搜索策略，shortest 表示最短路径，all 表示多路径。
+          schema:
+            type: string
+            enum: [shortest, all]
+            default: shortest
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 节点路径查询结果。
+                        $ref: '#/components/schemas/PathQueryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /query/subgraph:
+    post:
+      tags: [Query]
+      summary: 查询子图
+      description: |
+        按多个根节点、深度和过滤条件查询局部子图。
+        与 `/graph/subgraph` 相比，该接口支持更复杂的过滤能力，例如关系类型过滤、节点类型过滤。
+        适用于复杂图分析、前端高级筛选和业务局部视图构建。
+      operationId: querySubgraph
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubgraphQueryRequest'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 条件子图查询结果。
+                        $ref: '#/components/schemas/SubgraphResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /versions:
+    post:
+      tags: [Version]
+      summary: 保存版本
+      description: |
+        将当前图谱状态保存为一个版本快照。
+        该接口用于手动创建版本，通常在用户希望显式记录一次阶段性成果时调用。
+        保存版本后，后端应写入版本记录和快照数据，供后续查看、比对和回滚。
+      operationId: createVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVersionRequest'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 新创建的版本对象。
+                        $ref: '#/components/schemas/GraphVersion'
+    get:
+      tags: [Version]
+      summary: 获取版本列表
+      description: |
+        查询指定图谱的版本历史列表。
+        返回版本分页结果，用于前端版本中心展示、选择历史版本、执行回滚前的版本筛选。
+      operationId: listVersions
+      parameters:
+        - $ref: '#/components/parameters/GraphIdQuery'
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 版本列表分页结果。
+                        $ref: '#/components/schemas/VersionListResponse'
+
+  /versions/{versionId}:
+    get:
+      tags: [Version]
+      summary: 获取版本详情
+      description: |
+        查询单个版本的详细信息。
+        返回版本元信息、快照统计摘要以及可选差异信息，用于版本详情页和历史版本对比场景。
+      operationId: getVersionDetail
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          description: 版本 ID。
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 版本详情。
+                        $ref: '#/components/schemas/VersionDetailResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /versions/{versionId}/rollback:
+    post:
+      tags: [Version]
+      summary: 回滚版本
+      description: |
+        将图谱状态回滚到指定历史版本。
+        后端应基于该版本的快照重建当前图谱状态，并生成一条新的 rollback 类型版本记录。
+        该接口用于修正错误数据、恢复历史状态，但不等价于“仅查看历史图”。
+      operationId: rollbackVersion
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          description: 版本 ID。
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackVersionRequest'
+      responses:
+        '200':
+          description: 回滚成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        description: 版本回滚结果。
+                        properties:
+                          rolledBackFrom:
+                            type: string
+                            description: 被回滚的原始版本 ID。
+                            example: ver_12
+                          newVersion:
+                            description: 回滚后自动生成的新版本对象。
+                            $ref: '#/components/schemas/GraphVersion'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /ai/parse:
+    post:
+      tags: [AI]
+      summary: 提交 AI 解析任务
+      description: |
+        内部 AI 边界接口，不作为前端主流程入口。
+        通常由任务模块或内部编排层调用，用于将文本内容送入 AI 解析。
+      operationId: createAiParseJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AiParseRequest'
+      responses:
+        '202':
+          description: 已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 已受理的 AI 作业信息。
+                        $ref: '#/components/schemas/AiJobAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /ai/jobs/{jobId}:
+    get:
+      tags: [AI]
+      summary: 查询 AI 任务状态
+      description: |
+        查询内部 AI 作业状态。
+        该接口主要供任务模块或内部编排层同步 AI 处理进度，不建议作为前端主流程直接调用。
+      operationId: getAiJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          description: AI 作业 ID。
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: AI 作业详情。
+                        $ref: '#/components/schemas/AiJob'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /ai/jobs/{jobId}/apply:
+    post:
+      tags: [AI]
+      summary: 关联 AI 结果到任务上下文
+      description: |
+        内部 AI 边界接口。
+        将已校验的 AI 作业结果转入任务上下文或任务结果存储，不直接写入图数据库。
+        正式入图必须走 /tasks/{taskId}/apply。
+      operationId: attachAiJobResultToTask
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          description: AI 作业 ID。
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 应用成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        description: AI 作业结果已关联到任务上下文后的结果。
+                        properties:
+                          jobId:
+                            type: string
+                            description: AI 作业 ID。
+                            example: job_1
+                          status:
+                            type: string
+                            description: 当前内部处理状态。
+                            example: validated
+                          taskId:
+                            type: string
+                            nullable: true
+                            description: 关联的任务 ID。
+                            example: task_1
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+components:
+  parameters:
+    GraphIdQuery:
+      name: graphId
+      in: query
+      required: true
+      description: 图谱作用域 ID，用于区分不同图谱或业务空间。
+      schema:
+        type: string
+      example: default
+    NodeId:
+      name: id
+      in: path
+      required: true
+      description: 节点唯一标识。
+      schema:
+        type: string
+      example: person_1
+    EdgeId:
+      name: id
+      in: path
+      required: true
+      description: 关系唯一标识。
+      schema:
+        type: string
+      example: edge_1
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      description: 任务唯一标识。
+      schema:
+        type: string
+      example: task_1
+
+  responses:
+    BadRequest:
+      description: 请求参数错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: 资源冲突
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    Meta:
+      type: object
+      description: 通用响应元信息，便于请求链路追踪与排障。
+      properties:
+        requestId:
+          type: string
+          description: 请求唯一标识，通常由网关或中间件生成。
+          example: req_123
+        timestamp:
+          type: string
+          format: date-time
+          description: 服务端生成响应的时间点。
+          example: '2026-03-19T10:00:00.000Z'
+      required: [requestId, timestamp]
+
+    ErrorBody:
+      type: object
+      description: 通用错误体。
+      properties:
+        code:
+          type: string
+          description: 机器可处理的错误码。
+          example: GRAPH_NODE_NOT_FOUND
+        message:
+          type: string
+          description: 面向调用方的错误说明。
+          example: Node not found
+        details:
+          type: object
+          description: 错误附加信息，可放字段级校验错误或上下文。
+          additionalProperties: true
+      required: [code, message]
+
+    SuccessResponse:
+      type: object
+      description: 通用成功响应包裹结构。
+      properties:
+        success:
+          type: boolean
+          description: 是否成功。
+          example: true
+        data:
+          description: 实际业务返回内容，结构由具体接口决定。
+          nullable: true
+        meta:
+          description: 通用响应元信息。
+          $ref: '#/components/schemas/Meta'
+      required: [success, meta]
+
+    ErrorResponse:
+      type: object
+      description: 通用失败响应包裹结构。
+      properties:
+        success:
+          type: boolean
+          description: 是否成功。失败时固定为 false。
+          example: false
+        error:
+          description: 错误信息对象。
+          $ref: '#/components/schemas/ErrorBody'
+        meta:
+          description: 通用响应元信息。
+          $ref: '#/components/schemas/Meta'
+      required: [success, error, meta]
+
+    Position:
+      type: object
+      description: 前端图编辑器中的节点布局坐标。
+      properties:
+        x:
+          type: number
+          description: 节点横坐标。
+          example: 240
+        y:
+          type: number
+          description: 节点纵坐标。
+          example: 180
+      required: [x, y]
+
+    GraphNodeType:
+      type: string
+      description: 可扩展节点类型字符串，当前典型值包括 person、company、organization、place、event
+      example: person
+
+    TaskStatus:
+      type: string
+      description: 任务状态机。典型流转为 uploaded -> queued -> processing -> validated -> applied。
+      enum:
+        [uploaded, queued, processing, validated, applied, failed, canceled]
+
+    TaskSourceType:
+      type: string
+      description: 任务输入来源类型。
+      enum: [document, text, news, social, story, custom]
+
+    GraphNode:
+      type: object
+      description: 图谱中的通用节点结构。
+      properties:
+        id:
+          type: string
+          description: 节点唯一标识。
+          example: person_1
+        graphId:
+          type: string
+          description: 所属图谱 ID。
+          example: default
+        type:
+          description: 节点类型。
+          $ref: '#/components/schemas/GraphNodeType'
+        label:
+          type: string
+          description: 节点展示名称。
+          example: Elon Musk
+        properties:
+          type: object
+          description: 节点扩展属性，如简介、别名、来源补充信息、置信度等。
+          additionalProperties: true
+        position:
+          description: 节点在前端编辑器中的布局坐标。
+          $ref: '#/components/schemas/Position'
+        occurredAt:
+          type: string
+          format: date
+          nullable: true
+          description: 事件类节点发生日期。
+        periodStart:
+          type: string
+          format: date
+          nullable: true
+          description: 事件类节点开始时间。
+        periodEnd:
+          type: string
+          format: date
+          nullable: true
+          description: 事件类节点结束时间。
+        placeId:
+          type: string
+          nullable: true
+          description: 事件类节点关联的地点节点 ID。
+        participants:
+          type: array
+          description: 事件类节点参与者节点 ID 列表。
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+          description: 节点创建时间。
+        updatedAt:
+          type: string
+          format: date-time
+          description: 节点最近更新时间。
+      required: [id, graphId, type, label, properties]
+
+    EventNode:
+      allOf:
+        - $ref: '#/components/schemas/GraphNode'
+        - type: object
+          description: 事件类节点示例，本质上仍是通用节点，只是通常带有时间和参与者字段。
+
+    GraphEdge:
+      type: object
+      description: 图谱中的关系结构。
+      properties:
+        id:
+          type: string
+          description: 关系唯一标识。
+          example: edge_1
+        graphId:
+          type: string
+          description: 所属图谱 ID。
+          example: default
+        sourceId:
+          type: string
+          description: 起点节点 ID。
+          example: person_1
+        targetId:
+          type: string
+          description: 终点节点 ID。
+          example: company_1
+        relation:
+          type: string
+          description: 机器可处理的关系语义标识，采用开放字符串。
+          example: founder_of
+        label:
+          type: string
+          nullable: true
+          description: 面向前端展示的关系标签。
+          example: 创始人
+        start:
+          type: string
+          format: date
+          nullable: true
+          description: 关系开始日期。
+        end:
+          type: string
+          format: date
+          nullable: true
+          description: 关系结束日期；为空表示仍然有效或未知。
+        weight:
+          type: number
+          nullable: true
+          description: 关系强度、置信度或业务权重。
+          example: 0.92
+        properties:
+          type: object
+          description: 关系扩展属性。
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+          description: 关系创建时间。
+        updatedAt:
+          type: string
+          format: date-time
+          description: 关系最近更新时间。
+      required: [id, graphId, sourceId, targetId, relation, properties]
+
+    CreateNodeRequest:
+      type: object
+      description: 创建节点请求体。
+      properties:
+        graphId:
+          type: string
+          description: 节点所属图谱 ID。
+          example: default
+        type:
+          description: 节点类型。
+          $ref: '#/components/schemas/GraphNodeType'
+        label:
+          type: string
+          description: 节点显示名称。
+          example: Elon Musk
+        properties:
+          type: object
+          description: 节点扩展属性。
+          additionalProperties: true
+        position:
+          description: 初始布局坐标。
+          $ref: '#/components/schemas/Position'
+        occurredAt:
+          type: string
+          format: date
+          description: 事件类节点发生日期。
+        periodStart:
+          type: string
+          format: date
+          description: 事件类节点开始时间。
+        periodEnd:
+          type: string
+          format: date
+          description: 事件类节点结束时间。
+        placeId:
+          type: string
+          description: 事件类节点关联的地点节点 ID。
+        participants:
+          type: array
+          description: 事件类节点参与者节点 ID 列表。
+          items:
+            type: string
+        source:
+          description: 创建该节点时的来源信息。
+          $ref: '#/components/schemas/SourceCreateRequest'
+      required: [graphId, type, label, properties]
+
+    UpdateNodeRequest:
+      type: object
+      description: 更新节点请求体，仅提交需要修改的字段。
+      properties:
+        label:
+          type: string
+          description: 新的节点显示名称。
+        properties:
+          type: object
+          description: 更新后的节点扩展属性。
+          additionalProperties: true
+        position:
+          description: 更新后的布局坐标。
+          $ref: '#/components/schemas/Position'
+        occurredAt:
+          type: string
+          format: date
+          description: 更新后的事件发生日期。
+        periodStart:
+          type: string
+          format: date
+          description: 更新后的事件开始时间。
+        periodEnd:
+          type: string
+          format: date
+          description: 更新后的事件结束时间。
+        placeId:
+          type: string
+          description: 更新后的地点节点 ID。
+        participants:
+          type: array
+          description: 更新后的参与者节点 ID 列表。
+          items:
+            type: string
+
+    CreateEdgeRequest:
+      type: object
+      description: 创建关系请求体。
+      properties:
+        graphId:
+          type: string
+          description: 关系所属图谱 ID。
+          example: default
+        sourceId:
+          type: string
+          description: 起点节点 ID。
+          example: person_1
+        targetId:
+          type: string
+          description: 终点节点 ID。
+          example: company_1
+        relation:
+          type: string
+          description: 关系语义标识。
+          example: founder_of
+        label:
+          type: string
+          description: 关系展示标签。
+          example: 创始人
+        start:
+          type: string
+          format: date
+          nullable: true
+          description: 关系开始日期。
+        end:
+          type: string
+          format: date
+          nullable: true
+          description: 关系结束日期。
+        weight:
+          type: number
+          nullable: true
+          description: 关系强度或置信度。
+        properties:
+          type: object
+          description: 关系扩展属性。
+          additionalProperties: true
+        source:
+          description: 创建该关系时的来源信息。
+          $ref: '#/components/schemas/SourceCreateRequest'
+      required: [graphId, sourceId, targetId, relation, properties]
+
+    SourceCreateRequest:
+      type: object
+      description: 创建来源记录时的最小输入结构。
+      properties:
+        sourceType:
+          type: string
+          enum: [manual, task, import, ai]
+          description: 来源类别。manual 表示人工录入，task 表示任务导入。
+          example: manual
+        sourceRefId:
+          type: string
+          nullable: true
+          description: 来源对应的外部主键，例如 taskId。
+          example: task_1
+        title:
+          type: string
+          description: 来源标题。
+          example: 人工录入
+        content:
+          type: string
+          description: 原始内容、备注或来源摘要。
+          example: 运营人员手工创建人物节点
+      required: [sourceType, title]
+
+    SourceRecord:
+      type: object
+      description: 已落库的来源记录。
+      properties:
+        id:
+          type: string
+          description: 来源记录唯一标识。
+          example: src_1
+        graphId:
+          type: string
+          description: 所属图谱 ID。
+          example: default
+        sourceType:
+          type: string
+          enum: [manual, task, import, ai]
+          description: 来源类别。
+        sourceRefId:
+          type: string
+          nullable: true
+          description: 来源对应的外部主键，例如任务 ID。
+        title:
+          type: string
+          description: 来源标题。
+          example: 人物采访文档
+        content:
+          type: string
+          description: 原始内容、来源摘要或备注。
+          example: A 表示自己与 B 在 2024 年开始合作。
+        createdBy:
+          type: string
+          nullable: true
+          description: 创建来源记录的用户 ID。
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间。
+      required: [id, graphId, sourceType, title, createdAt]
+
+    EvidenceRecord:
+      type: object
+      description: 与节点或关系关联的证据片段，可直接展示给前端。
+      properties:
+        id:
+          type: string
+          description: 证据片段唯一标识。
+          example: evd_1
+        sourceRecordId:
+          type: string
+          description: 关联的来源记录 ID。
+          example: src_1
+        subjectNodeId:
+          type: string
+          description: 证据主语节点 ID。
+          example: person_a
+        targetNodeId:
+          type: string
+          nullable: true
+          description: 证据宾语节点 ID。
+          example: person_b
+        edgeId:
+          type: string
+          nullable: true
+          description: 若证据直接对应某条关系，则记录关系 ID。
+          example: edge_1
+        relation:
+          type: string
+          nullable: true
+          description: 证据对应的关系语义。
+          example: cooperate
+        excerpt:
+          type: string
+          description: 可直接展示给前端的证据摘录或口供内容。
+          example: A 表示自己与 B 在 2024 年开始合作。
+        speaker:
+          type: string
+          nullable: true
+          description: 说话人或陈述主体。
+          example: A
+        pageNo:
+          type: integer
+          nullable: true
+          description: 证据在原始文件中的页码。
+          example: 2
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间。
+      required: [id, sourceRecordId, subjectNodeId, excerpt]
+
+    ChangeHistoryItem:
+      type: object
+      description: 节点或关系的历史变更记录项。
+      properties:
+        id:
+          type: string
+          description: 变更记录唯一标识。
+          example: chg_1
+        entityType:
+          type: string
+          enum: [node, edge]
+          description: 变更对象类型。
+          example: node
+        entityId:
+          type: string
+          description: 变更对象 ID。
+          example: person_1
+        action:
+          type: string
+          enum: [create, update, delete]
+          description: 变更动作类型。
+          example: update
+        field:
+          type: string
+          description: 被修改的字段名。
+          example: label
+        oldValue:
+          nullable: true
+          description: 修改前的值。
+        newValue:
+          nullable: true
+          description: 修改后的值。
+        operatorId:
+          type: string
+          description: 执行操作的用户 ID。
+          example: user_1
+        createdAt:
+          type: string
+          format: date-time
+          description: 变更时间。
+      required: [id, entityType, entityId, action, operatorId, createdAt]
+
+    NodeHistoryResponse:
+      type: object
+      description: 节点历史记录列表响应。
+      properties:
+        nodeId:
+          type: string
+          description: 节点 ID。
+          example: person_1
+        items:
+          type: array
+          description: 历史记录列表。
+          items:
+            $ref: '#/components/schemas/ChangeHistoryItem'
+      required: [nodeId, items]
+
+    SourceRecordListResponse:
+      type: object
+      description: 来源记录列表响应。
+      properties:
+        items:
+          type: array
+          description: 来源记录列表。
+          items:
+            $ref: '#/components/schemas/SourceRecord'
+      required: [items]
+
+    UpdateEdgeRequest:
+      type: object
+      description: 更新关系请求体，仅提交需要修改的字段。
+      properties:
+        relation:
+          type: string
+          description: 新的关系语义标识。
+        label:
+          type: string
+          description: 新的关系展示标签。
+        start:
+          type: string
+          format: date
+          nullable: true
+          description: 新的关系开始日期。
+        end:
+          type: string
+          format: date
+          nullable: true
+          description: 新的关系结束日期。
+        weight:
+          type: number
+          nullable: true
+          description: 新的关系强度或置信度。
+        properties:
+          type: object
+          description: 更新后的关系扩展属性。
+          additionalProperties: true
+
+    GraphVersion:
+      type: object
+      description: 图谱版本元信息。
+      properties:
+        id:
+          type: string
+          description: 版本唯一标识。
+          example: ver_1
+        graphId:
+          type: string
+          description: 所属图谱 ID。
+          example: default
+        versionNo:
+          type: integer
+          description: 版本号。
+          example: 1
+        name:
+          type: string
+          description: 版本名称。
+          example: v1-initial-import
+        description:
+          type: string
+          nullable: true
+          description: 版本说明。
+        trigger:
+          type: string
+          enum: [manual, auto, rollback, ai-import]
+          description: 版本产生方式。
+        snapshotId:
+          type: string
+          description: 关联快照 ID。
+          example: snap_1
+        createdBy:
+          type: string
+          description: 创建版本的用户 ID。
+          example: user_1
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间。
+      required:
+        [id, graphId, versionNo, name, trigger, snapshotId, createdBy, createdAt]
+
+    CreateVersionRequest:
+      type: object
+      description: 手动创建版本请求体。
+      properties:
+        graphId:
+          type: string
+          description: 目标图谱 ID。
+          example: default
+        name:
+          type: string
+          description: 版本名称。
+          example: v1-initial-import
+        description:
+          type: string
+          description: 版本说明。
+          example: 首次导入新闻人物关系
+        trigger:
+          type: string
+          enum: [manual, auto, rollback, ai-import]
+          description: 触发方式。
+          example: manual
+      required: [graphId, name, trigger]
+
+    RollbackVersionRequest:
+      type: object
+      description: 回滚版本请求体。
+      properties:
+        graphId:
+          type: string
+          description: 目标图谱 ID。
+          example: default
+        reason:
+          type: string
+          description: 回滚原因说明。
+          example: 数据修正
+      required: [graphId]
+
+    VersionSummary:
+      type: object
+      description: 图谱视图中携带的版本摘要。
+      properties:
+        versionId:
+          type: string
+          description: 版本 ID。
+          example: ver_latest
+        versionNo:
+          type: integer
+          description: 版本号。
+          example: 12
+        name:
+          type: string
+          description: 版本名称。
+          example: latest
+
+    GraphView:
+      type: object
+      description: 前端整图渲染所需的图谱视图。
+      properties:
+        graphId:
+          type: string
+          description: 图谱 ID。
+          example: default
+        nodes:
+          type: array
+          description: 当前图谱中的节点集合。
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/GraphNode'
+              - $ref: '#/components/schemas/EventNode'
+        edges:
+          type: array
+          description: 当前图谱中的关系集合。
+          items:
+            $ref: '#/components/schemas/GraphEdge'
+        version:
+          description: 当前图谱对应的版本摘要。
+          $ref: '#/components/schemas/VersionSummary'
+      required: [graphId, nodes, edges]
+
+    SubgraphQueryRequest:
+      type: object
+      description: 子图查询请求体。
+      properties:
+        graphId:
+          type: string
+          description: 目标图谱 ID。
+          example: default
+        rootIds:
+          type: array
+          description: 子图查询的根节点 ID 列表。
+          items:
+            type: string
+        depth:
+          type: integer
+          minimum: 1
+          default: 2
+          description: 从根节点向外扩展的深度。
+        relationFilters:
+          type: array
+          description: 关系语义过滤条件。
+          items:
+            type: string
+        nodeTypes:
+          type: array
+          description: 节点类型过滤条件。
+          items:
+            $ref: '#/components/schemas/GraphNodeType'
+      required: [graphId, rootIds, depth]
+
+    SubgraphResponse:
+      type: object
+      description: 子图查询结果。
+      properties:
+        graphId:
+          type: string
+          description: 图谱 ID。
+        nodes:
+          type: array
+          description: 子图节点集合。
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/GraphNode'
+              - $ref: '#/components/schemas/EventNode'
+        edges:
+          type: array
+          description: 子图关系集合。
+          items:
+            $ref: '#/components/schemas/GraphEdge'
+      required: [graphId, nodes, edges]
+
+    RelationItem:
+      type: object
+      description: 节点关系查询中的单条关系项。
+      properties:
+        edge:
+          description: 当前节点与邻接节点之间的关系。
+          $ref: '#/components/schemas/GraphEdge'
+        neighbor:
+          description: 与当前节点相连的邻接节点。
+          oneOf:
+            - $ref: '#/components/schemas/GraphNode'
+            - $ref: '#/components/schemas/EventNode'
+      required: [edge, neighbor]
+
+    RelationsResponse:
+      type: object
+      description: 节点关系查询结果。
+      properties:
+        node:
+          description: 当前查询的中心节点。
+          oneOf:
+            - $ref: '#/components/schemas/GraphNode'
+            - $ref: '#/components/schemas/EventNode'
+        relations:
+          type: array
+          description: 邻接关系列表。
+          items:
+            $ref: '#/components/schemas/RelationItem'
+      required: [node, relations]
+
+    NodeEvidenceItem:
+      type: object
+      description: 节点详情页中返回的单条证据或口供内容。
+      properties:
+        edgeId:
+          type: string
+          nullable: true
+          description: 关联的关系 ID。
+          example: edge_1
+        relation:
+          type: string
+          nullable: true
+          description: 证据所支撑的关系语义。
+          example: cooperate
+        excerpt:
+          type: string
+          description: 证据摘录内容。
+          example: A 表示自己与 B 在 2024 年开始合作。
+        sourceType:
+          type: string
+          description: 证据来源类型。
+          example: task
+        sourceTitle:
+          type: string
+          description: 来源标题。
+          example: 人物采访文档
+        speaker:
+          type: string
+          nullable: true
+          description: 说话人或陈述主体。
+          example: A
+        pageNo:
+          type: integer
+          nullable: true
+          description: 原始文件页码。
+          example: 2
+      required: [excerpt, sourceType, sourceTitle]
+
+    NodeDetailResponse:
+      type: object
+      description: 节点详情页聚合结果。
+      properties:
+        node:
+          description: 节点基础信息。
+          oneOf:
+            - $ref: '#/components/schemas/GraphNode'
+            - $ref: '#/components/schemas/EventNode'
+        relations:
+          type: array
+          description: 与该节点相关的关系集合。
+          items:
+            $ref: '#/components/schemas/RelationItem'
+        evidences:
+          type: array
+          description: 与该节点相关的证据内容集合。
+          items:
+            $ref: '#/components/schemas/NodeEvidenceItem'
+        changeHistory:
+          type: array
+          description: 节点历史变更记录。
+          items:
+            $ref: '#/components/schemas/ChangeHistoryItem'
+      required: [node, relations, evidences, changeHistory]
+
+    NodeSourcesResponse:
+      type: object
+      description: 节点来源与证据响应。
+      properties:
+        nodeId:
+          type: string
+          description: 节点 ID。
+          example: node_1
+        sources:
+          type: array
+          description: 与该节点关联的来源记录。
+          items:
+            $ref: '#/components/schemas/SourceRecord'
+        evidences:
+          type: array
+          description: 与该节点关联的证据片段。
+          items:
+            $ref: '#/components/schemas/EvidenceRecord'
+      required: [nodeId, sources, evidences]
+
+    EdgeDetailResponse:
+      type: object
+      description: 关系详情聚合结果。
+      properties:
+        edge:
+          description: 关系基础信息。
+          $ref: '#/components/schemas/GraphEdge'
+        sources:
+          type: array
+          description: 与该关系关联的来源记录。
+          items:
+            $ref: '#/components/schemas/SourceRecord'
+        evidences:
+          type: array
+          description: 与该关系关联的证据片段。
+          items:
+            $ref: '#/components/schemas/EvidenceRecord'
+      required: [edge, sources, evidences]
+
+    NodeSearchItem:
+      type: object
+      description: 节点搜索结果项。
+      properties:
+        node:
+          description: 命中的节点对象。
+          oneOf:
+            - $ref: '#/components/schemas/GraphNode'
+            - $ref: '#/components/schemas/EventNode'
+        matchedField:
+          type: string
+          description: 命中的字段名，例如 label 或 properties.aliases。
+          example: label
+        matchedText:
+          type: string
+          description: 命中的关键词片段。
+          example: Zhang San
+      required: [node]
+
+    NodeSearchResponse:
+      type: object
+      description: 节点搜索分页响应。
+      properties:
+        items:
+          type: array
+          description: 搜索结果列表。
+          items:
+            $ref: '#/components/schemas/NodeSearchItem'
+        page:
+          type: integer
+          description: 当前页码。
+          example: 1
+        pageSize:
+          type: integer
+          description: 每页条数。
+          example: 20
+        total:
+          type: integer
+          description: 总记录数。
+          example: 3
+      required: [items, page, pageSize, total]
+
+    PathItem:
+      type: object
+      description: 一条路径查询结果。
+      properties:
+        nodes:
+          type: array
+          description: 该路径经过的节点序列。
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/GraphNode'
+              - $ref: '#/components/schemas/EventNode'
+        edges:
+          type: array
+          description: 该路径经过的关系序列。
+          items:
+            $ref: '#/components/schemas/GraphEdge'
+        length:
+          type: integer
+          description: 路径长度，通常表示关系条数。
+          example: 3
+      required: [nodes, edges, length]
+
+    PathQueryResponse:
+      type: object
+      description: 路径查询结果集合。
+      properties:
+        paths:
+          type: array
+          description: 路径结果列表。
+          items:
+            $ref: '#/components/schemas/PathItem'
+      required: [paths]
+
+    VersionListResponse:
+      type: object
+      description: 版本列表分页响应。
+      properties:
+        items:
+          type: array
+          description: 版本列表。
+          items:
+            $ref: '#/components/schemas/GraphVersion'
+        page:
+          type: integer
+          description: 当前页码。
+          example: 1
+        pageSize:
+          type: integer
+          description: 每页条数。
+          example: 20
+        total:
+          type: integer
+          description: 总记录数。
+          example: 1
+      required: [items, page, pageSize, total]
+
+    VersionDetailResponse:
+      type: object
+      description: 版本详情响应。
+      properties:
+        version:
+          description: 版本元信息。
+          $ref: '#/components/schemas/GraphVersion'
+        snapshotSummary:
+          type: object
+          description: 该版本快照的统计摘要。
+          properties:
+            nodeCount:
+              type: integer
+              description: 快照中节点数量。
+              example: 24
+            edgeCount:
+              type: integer
+              description: 快照中关系数量。
+              example: 31
+            capturedAt:
+              type: string
+              format: date-time
+              description: 快照采集时间。
+        diff:
+          type: object
+          nullable: true
+          description: 与相邻版本的差异摘要。
+          additionalProperties: true
+      required: [version]
+
+    AiParseRequest:
+      type: object
+      description: AI 解析边界接口请求体。
+      properties:
+        graphId:
+          type: string
+          description: 目标图谱 ID。
+          example: default
+        sourceType:
+          type: string
+          enum: [news, social, story, custom]
+          description: 解析内容来源类型。
+          example: news
+        content:
+          type: string
+          description: 需要 AI 解析的原始文本。
+          example: 2024年，A 与 B 宣布合作，在上海共同参与 AI 峰会。
+        options:
+          type: object
+          properties:
+            language:
+              type: string
+              description: 输入文本语言。
+              example: zh-CN
+            autoMergeEntities:
+              type: boolean
+              description: 是否在解析后自动合并重复实体。
+              example: true
+            createSnapshot:
+              type: boolean
+              description: 是否在结果应用时建议生成版本快照。
+              example: true
+      required: [graphId, sourceType, content]
+
+    TaskFile:
+      type: object
+      description: 任务关联的文件元信息。
+      properties:
+        fileId:
+          type: string
+          description: 文件唯一标识。
+          example: file_1
+        fileName:
+          type: string
+          description: 文件名称。
+          example: interview.pdf
+        mimeType:
+          type: string
+          description: 文件 MIME 类型。
+          example: application/pdf
+        size:
+          type: integer
+          description: 文件大小，单位字节。
+          example: 204800
+        storageKey:
+          type: string
+          description: 文件在对象存储或文件系统中的路径标识。
+          example: uploads/2026/03/interview.pdf
+      required: [fileId, fileName, mimeType]
+
+    TaskFileInput:
+      type: object
+      description: 创建任务时提交的单个文件输入信息。由客户端提供原始文件元信息，不要求已有 fileId。
+      properties:
+        fileName:
+          type: string
+          description: 文件名称。
+          example: interview.docx
+        mimeType:
+          type: string
+          description: 文件 MIME 类型。
+          example: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+        size:
+          type: integer
+          description: 文件大小，单位字节。
+          example: 204800
+        storageKey:
+          type: string
+          description: 文件临时上传后的存储路径标识。
+          example: uploads/2026/03/interview.docx
+      required: [fileName, mimeType]
+
+    CreateTaskRequest:
+      type: object
+      description: 创建任务请求体。
+      anyOf:
+        - required: [content]
+        - required: [files]
+      properties:
+        graphId:
+          type: string
+          description: 任务所属图谱 ID。
+          example: default
+        sourceType:
+          description: 任务输入来源类型。
+          $ref: '#/components/schemas/TaskSourceType'
+        title:
+          type: string
+          description: 任务标题，用于任务中心列表展示。
+          example: 人物采访文档解析任务
+        content:
+          type: string
+          description: 当来源是纯文本时可直接传入内容
+        files:
+          type: array
+          description: 当来源是文件时提交的文件元信息列表。
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/TaskFileInput'
+        options:
+          type: object
+          description: 任务处理选项。
+          properties:
+            language:
+              type: string
+              description: 输入内容语言。
+              example: zh-CN
+            autoMergeEntities:
+              type: boolean
+              description: 是否自动合并重复实体。
+              example: true
+            createSnapshot:
+              type: boolean
+              description: 应用结果时是否建议生成版本快照。
+              example: true
+      required: [graphId, sourceType, title]
+
+    TaskVersionLink:
+      type: object
+      description: 任务关联的版本信息摘要。
+      properties:
+        versionId:
+          type: string
+          description: 版本 ID。
+          example: ver_21
+        versionNo:
+          type: integer
+          description: 版本号。
+          example: 21
+        name:
+          type: string
+          description: 版本名称。
+          example: ai-import-20260319
+
+    TaskSummary:
+      type: object
+      description: 任务结构化结果统计摘要。
+      properties:
+        nodeCount:
+          type: integer
+          description: 任务结果中的节点数量。
+          example: 14
+        edgeCount:
+          type: integer
+          description: 任务结果中的关系数量。
+          example: 22
+        eventCount:
+          type: integer
+          description: 任务结果中的事件类节点数量。
+          example: 3
+
+    Task:
+      type: object
+      description: 任务中心中的任务对象。
+      properties:
+        id:
+          type: string
+          description: 任务唯一标识。
+          example: task_1
+        graphId:
+          type: string
+          description: 所属图谱 ID。
+          example: default
+        sourceType:
+          description: 任务输入来源类型。
+          $ref: '#/components/schemas/TaskSourceType'
+        title:
+          type: string
+          description: 任务标题。
+          example: 人物采访文档解析任务
+        status:
+          description: 当前任务状态。
+          $ref: '#/components/schemas/TaskStatus'
+        files:
+          type: array
+          description: 已保存的文件元信息列表。
+          items:
+            $ref: '#/components/schemas/TaskFile'
+        contentPreview:
+          type: string
+          description: 原始内容或文档内容的截断预览。
+          example: 这是一段文档前 200 字摘要...
+        summary:
+          description: 任务结果统计摘要。
+          $ref: '#/components/schemas/TaskSummary'
+        currentVersion:
+          description: 若结果已入图，对应的当前版本摘要。
+          $ref: '#/components/schemas/TaskVersionLink'
+        errorMessage:
+          type: string
+          nullable: true
+          description: 任务失败时的错误说明。
+        createdBy:
+          type: string
+          description: 创建任务的用户 ID。
+          example: user_1
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间。
+        updatedAt:
+          type: string
+          format: date-time
+          description: 最近更新时间。
+      required:
+        [id, graphId, sourceType, title, status, createdAt, updatedAt]
+
+    TaskListResponse:
+      type: object
+      description: 任务列表分页响应。
+      properties:
+        items:
+          type: array
+          description: 任务列表。
+          items:
+            $ref: '#/components/schemas/Task'
+        page:
+          type: integer
+          description: 当前页码。
+          example: 1
+        pageSize:
+          type: integer
+          description: 每页条数。
+          example: 20
+        total:
+          type: integer
+          description: 总记录数。
+          example: 12
+      required: [items, page, pageSize, total]
+
+    TaskResultResponse:
+      type: object
+      description: 任务结构化结果响应。
+      properties:
+        taskId:
+          type: string
+          description: 任务 ID。
+          example: task_1
+        status:
+          description: 返回结果时任务所处状态。
+          $ref: '#/components/schemas/TaskStatus'
+        result:
+          description: 标准化后的结构化结果。
+          $ref: '#/components/schemas/AiParseResult'
+      required: [taskId, status]
+
+    ApplyTaskRequest:
+      type: object
+      description: 应用任务结果入图时的请求体。
+      properties:
+        graphId:
+          type: string
+          description: 目标图谱 ID。
+          example: default
+        createSnapshot:
+          type: boolean
+          description: 是否在本次应用后创建图谱版本快照。
+          example: true
+        versionName:
+          type: string
+          description: 若创建快照，则使用的版本名称。
+          example: ai-import-20260319
+
+    TaskApplyResponse:
+      type: object
+      description: 应用任务结果后的响应。
+      properties:
+        taskId:
+          type: string
+          description: 已应用的任务 ID。
+          example: task_1
+        status:
+          description: 任务应用后的状态。
+          $ref: '#/components/schemas/TaskStatus'
+        version:
+          description: 本次应用产生的版本信息。
+          $ref: '#/components/schemas/GraphVersion'
+      required: [taskId, status]
+
+    TaskEvent:
+      type: object
+      description: 任务处理过程中的事件记录。
+      properties:
+        id:
+          type: string
+          description: 事件唯一标识。
+          example: evt_1
+        taskId:
+          type: string
+          description: 所属任务 ID。
+          example: task_1
+        type:
+          type: string
+          description: 事件类型。
+          example: status_changed
+        message:
+          type: string
+          description: 事件说明文本。
+          example: 文档已进入解析队列
+        payload:
+          type: object
+          description: 事件附加上下文数据。
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+          description: 事件发生时间。
+      required: [id, taskId, type, message, createdAt]
+
+    TaskEventListResponse:
+      type: object
+      description: 任务事件流响应。
+      properties:
+        taskId:
+          type: string
+          description: 任务 ID。
+          example: task_1
+        items:
+          type: array
+          description: 事件列表。
+          items:
+            $ref: '#/components/schemas/TaskEvent'
+      required: [taskId, items]
+
+    AiParseResultMeta:
+      type: object
+      description: AI 输出结果的元信息。
+      properties:
+        sourceType:
+          type: string
+          description: AI 解析输入来源类型。
+        language:
+          type: string
+          description: 输入文本语言。
+        summary:
+          type: string
+          description: AI 生成的结果摘要。
+        provider:
+          type: string
+          description: AI 服务提供方标识。
+        model:
+          type: string
+          description: 使用的模型标识。
+      required: [sourceType]
+
+    AiParseResult:
+      type: object
+      description: AI 输出的标准结构化结果。
+      properties:
+        meta:
+          description: 解析结果元信息。
+          $ref: '#/components/schemas/AiParseResultMeta'
+        nodes:
+          type: array
+          description: AI 识别出的节点集合。
+          items:
+            $ref: '#/components/schemas/GraphNode'
+        edges:
+          type: array
+          description: AI 识别出的关系集合。
+          items:
+            $ref: '#/components/schemas/GraphEdge'
+        events:
+          type: array
+          description: AI 识别出的事件类节点集合。
+          items:
+            $ref: '#/components/schemas/EventNode'
+      required: [meta, nodes, edges, events]
+
+    AiJob:
+      type: object
+      description: AI 边界接口中的作业对象。
+      properties:
+        id:
+          type: string
+          description: AI 作业唯一标识。
+          example: job_1
+        graphId:
+          type: string
+          description: 目标图谱 ID。
+          example: default
+        taskId:
+          type: string
+          nullable: true
+          description: 若该 AI 作业由任务触发，则这里记录关联的任务 ID。
+          example: task_1
+        status:
+          type: string
+          enum: [pending, processing, validated, applied, failed]
+          description: AI 作业状态。
+          example: processing
+        inputText:
+          type: string
+          description: 提交给 AI 的原始文本。
+        result:
+          description: AI 解析后的结构化结果。
+          $ref: '#/components/schemas/AiParseResult'
+        errorMessage:
+          type: string
+          nullable: true
+          description: 作业失败时的错误说明。
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间。
+        updatedAt:
+          type: string
+          format: date-time
+          description: 最近更新时间。
+      required: [id, graphId, status, inputText, createdAt, updatedAt]
+
+    AiJobAcceptedResponse:
+      type: object
+      description: AI 解析任务受理后的返回结构。
+      properties:
+        jobId:
+          type: string
+          description: AI 作业 ID。
+          example: job_1
+        taskId:
+          type: string
+          nullable: true
+          description: 若该作业是从任务主流程中触发，则返回关联任务 ID。
+          example: task_1
+        status:
+          type: string
+          description: 当前受理状态。
+          example: pending
+      required: [jobId, status]
