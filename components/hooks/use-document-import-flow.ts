@@ -3,9 +3,9 @@
 import { type ChangeEvent, type DragEvent as ReactDragEvent, useCallback, useMemo, useRef, useState } from "react";
 
 import { openApiClient } from "@/lib/client/openapi-client";
+import { extractTextFromDocument, isSupportedDocumentFile } from "@/components/graph-editor-utils";
 
 import {
-  BACKEND_GRAPH_ID,
   createDocumentImportItem,
   sleep,
   type DocumentImportItem,
@@ -26,9 +26,15 @@ type UseDocumentImportFlowOptions = {
   setStatus: (message: string) => void;
   parseGraphDocument: (text: string) => GraphDocument;
   runAutoLayout: RunAutoLayoutFn;
+  onTaskChange?: (taskId: string) => void;
 };
 
-export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLayout }: UseDocumentImportFlowOptions) {
+export function useDocumentImportFlow({
+  setStatus,
+  parseGraphDocument,
+  runAutoLayout,
+  onTaskChange,
+}: UseDocumentImportFlowOptions) {
   const [documentImportItems, setDocumentImportItems] = useState<DocumentImportItem[]>([]);
   const [isDocumentProcessing, setIsDocumentProcessing] = useState(false);
   const [isDocumentDragActive, setIsDocumentDragActive] = useState(false);
@@ -82,10 +88,7 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
         });
       }
 
-      return openApiClient.applyTaskResult(taskId, {
-        graphId: BACKEND_GRAPH_ID,
-        createSnapshot: true,
-      });
+      return openApiClient.applyTaskResult(taskId);
     },
     [parseGraphDocument, runAutoLayout],
   );
@@ -100,7 +103,9 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
       const existingSignatures = new Set(
         documentImportItems.map((item) => `${item.name}-${item.size}-${item.lastModified}`),
       );
-      const nextItems = incomingFiles
+      const supportedFiles = incomingFiles.filter(isSupportedDocumentFile);
+      const unsupportedFiles = incomingFiles.filter((file) => !isSupportedDocumentFile(file));
+      const nextItems = supportedFiles
         .filter((file) => {
           const signature = `${file.name}-${file.size}-${file.lastModified}`;
           if (existingSignatures.has(signature)) {
@@ -113,11 +118,21 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
         .map(createDocumentImportItem);
 
       if (nextItems.length === 0) {
+        if (supportedFiles.length === 0 && unsupportedFiles.length > 0) {
+          setStatus("当前仅支持 .doc、.docx、.txt 文件。");
+          return;
+        }
+
         setStatus("所选文档已在处理列表中，请勿重复上传。");
         return;
       }
 
       setDocumentImportItems((previous) => [...previous, ...nextItems]);
+      if (unsupportedFiles.length > 0) {
+        setStatus(`已加入 ${nextItems.length} 份文档，已忽略 ${unsupportedFiles.length} 份不支持的文件（仅支持 .doc、.docx、.txt）。`);
+        return;
+      }
+
       setStatus(`已加入 ${nextItems.length} 份文档，等待处理。`);
     },
     [documentImportItems, setStatus],
@@ -180,6 +195,8 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
 
     try {
       for (const item of queue) {
+        let createdTaskId: string | null = null;
+
         updateDocumentImportItem(item.id, {
           status: "uploading",
           progress: 12,
@@ -187,25 +204,14 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
         });
 
         try {
-          let content = "";
-          try {
-            const canReadAsText =
-              item.type.startsWith("text/") ||
-              item.type.includes("json") ||
-              item.name.endsWith(".md") ||
-              item.name.endsWith(".txt");
-            if (canReadAsText) {
-              content = await item.file.text();
-            }
-          } catch {
-            content = "";
+          const parsedText = await extractTextFromDocument(item.file);
+          if (!parsedText) {
+            throw new Error("文档未提取到可解析文本，请检查文件内容后重试。");
           }
 
           const task = await openApiClient.createDocumentTask({
-            graphId: BACKEND_GRAPH_ID,
             sourceType: "document",
             title: item.name,
-            content: content.slice(0, 60000),
             files: [
               {
                 fileName: item.name,
@@ -213,17 +219,17 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
                 size: item.size,
               },
             ],
-            options: {
-              createSnapshot: true,
-            },
           });
+          createdTaskId = task.id;
+          onTaskChange?.(task.id);
 
           updateDocumentImportItem(item.id, {
             status: "processing",
             progress: 45,
-            message: `任务已创建（${task.id}），正在等待后端解析...`,
+            message: `任务已创建（${task.id}），正在提交解析文本...`,
           });
-          const applied = await processTaskToCanvas(task.id, (payload) => {
+          await openApiClient.parseTaskContent(task.id, { content: [parsedText] });
+          const processed = await processTaskToCanvas(task.id, (payload) => {
             updateDocumentImportItem(item.id, {
               status: payload.status,
               progress: payload.progress,
@@ -234,16 +240,19 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
           updateDocumentImportItem(item.id, {
             status: "completed",
             progress: 100,
-            message: applied.version
-              ? `处理完成，已入图并生成版本 #${applied.version.versionNo}`
-              : "处理完成，后端已应用任务结果。",
+            message: processed.status === "applied" ? "处理完成，后端已自动应用任务结果。" : "处理完成。",
           });
+          onTaskChange?.(task.id);
         } catch (error: unknown) {
           updateDocumentImportItem(item.id, {
             status: "failed",
             progress: 0,
             message: error instanceof Error ? error.message : "处理失败，请稍后重试。",
           });
+
+          if (createdTaskId) {
+            onTaskChange?.(createdTaskId);
+          }
         }
       }
 
@@ -251,7 +260,7 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
     } finally {
       setIsDocumentProcessing(false);
     }
-  }, [documentImportItems, processTaskToCanvas, setStatus, updateDocumentImportItem]);
+  }, [documentImportItems, onTaskChange, processTaskToCanvas, setStatus, updateDocumentImportItem]);
 
   const handleSubmitQuickTextTask = useCallback(async () => {
     const content = quickTaskContent.trim();
@@ -265,29 +274,24 @@ export function useDocumentImportFlow({ setStatus, parseGraphDocument, runAutoLa
     setStatus("正在提交文本任务到后端...");
     try {
       const task = await openApiClient.createDocumentTask({
-        graphId: BACKEND_GRAPH_ID,
         sourceType: quickTaskSourceType,
         title,
         content: content.slice(0, 60000),
-        options: {
-          createSnapshot: true,
-        },
       });
+      onTaskChange?.(task.id);
+      await openApiClient.parseTaskContent(task.id, { content: [content.slice(0, 60000)] });
 
       setStatus(`任务已创建（${task.id}），正在处理并导入画布...`);
-      const applied = await processTaskToCanvas(task.id);
+      const processed = await processTaskToCanvas(task.id);
       setQuickTaskContent("");
-      setStatus(
-        applied.version
-          ? `文本任务处理完成，已入图并生成版本 #${applied.version.versionNo}。`
-          : "文本任务处理完成，已入图。",
-      );
+      setStatus(processed.status === "applied" ? "文本任务处理完成，已入图。" : "文本任务处理完成。");
+      onTaskChange?.(task.id);
     } catch (error: unknown) {
       setStatus(error instanceof Error ? error.message : "文本任务提交失败，请稍后重试。");
     } finally {
       setIsQuickTaskSubmitting(false);
     }
-  }, [processTaskToCanvas, quickTaskContent, quickTaskSourceType, quickTaskTitle, setStatus]);
+  }, [onTaskChange, processTaskToCanvas, quickTaskContent, quickTaskSourceType, quickTaskTitle, setStatus]);
 
   const documentImportSummary = useMemo(() => {
     const summary = {

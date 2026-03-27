@@ -53,6 +53,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { openApiClient } from "@/lib/client/openapi-client";
+import type { Task } from "@/lib/domain/models";
 import { cn } from "@/lib/utils";
 
 import {
@@ -95,6 +96,7 @@ import {
   NewFileMenuButton,
   SectionCard,
   ShapePreview,
+  TaskList,
   WorkspaceFileList,
   formatWorkspaceTime,
 } from "./graph-editor-panels";
@@ -146,9 +148,9 @@ export function GraphEditor() {
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<string[]>([]);
   const [showWorkspaceSidebar, setShowWorkspaceSidebar] = useState(true);
-  const [isShapeLibraryCollapsed, setIsShapeLibraryCollapsed] = useState(false);
-  const [isWorkspaceFileListCollapsed, setIsWorkspaceFileListCollapsed] = useState(false);
-  const [showRightSidebar, setShowRightSidebar] = useState(false);
+  const [isTaskListCollapsed, setIsTaskListCollapsed] = useState(false);
+  const [isRightShapeLibraryCollapsed, setIsRightShapeLibraryCollapsed] = useState(false);
+  const [showRightSidebar, setShowRightSidebar] = useState(true);
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
@@ -190,6 +192,11 @@ export function GraphEditor() {
   const [renamingFileId, setRenamingFileId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState(sampleFile.name);
   const [selectedWorkspaceFilePreviewDraft, setSelectedWorkspaceFilePreviewDraft] = useState(() => stringifyGraphDocument(sampleFile.document));
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [isTaskListLoading, setIsTaskListLoading] = useState(false);
+  const [taskListError, setTaskListError] = useState<string | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const selectedEdgeLabelOwner = edges.find((edge) => edge.id === selectedEdgeLabelId) ?? null;
@@ -200,7 +207,6 @@ export function GraphEditor() {
     [selectedWorkspaceFile],
   );
   const isSelectedWorkspaceFilePreviewDirty = selectedWorkspaceFilePreviewDraft !== selectedWorkspaceFilePreview;
-
   useEffect(() => {
     setSelectedWorkspaceFilePreviewDraft(selectedWorkspaceFilePreview);
   }, [selectedWorkspaceFilePreview]);
@@ -226,10 +232,6 @@ export function GraphEditor() {
   const selectedEdgeLabelText = typeof selectedEdgeLabelOwner?.label === "string" ? selectedEdgeLabelOwner.label : "";
   const selectedShapeNode = isShapeNode(selectedNode) ? selectedNode : null;
   const selectedEdgeLabel = typeof selectedEdge?.label === "string" ? selectedEdge.label : "";
-  const selectionSignature = useMemo(
-    () => `${selectedNodeIds.join(",")}|${selectedEdgeIds.join(",")}|${selectedEdgeLabelId ?? ""}`,
-    [selectedEdgeIds, selectedEdgeLabelId, selectedNodeIds],
-  );
 
   useEffect(() => {
     workspaceFilesRef.current = workspaceFiles;
@@ -345,18 +347,15 @@ export function GraphEditor() {
       nodeIds = [],
       primaryEdgeId,
       primaryNodeId,
-      showInspector,
     }: {
       edgeIds?: string[];
       edgeLabelId?: string | null;
       nodeIds?: string[];
       primaryEdgeId?: string | null;
       primaryNodeId?: string | null;
-      showInspector?: boolean;
     }) => {
       const nodeIdSet = new Set(nodeIds);
       const edgeIdSet = new Set(edgeIds);
-      const hasSelection = nodeIds.length > 0 || edgeIds.length > 0 || Boolean(edgeLabelId);
 
       setSelectedNodeIds(nodeIds);
       setSelectedEdgeIds(edgeIds);
@@ -365,18 +364,12 @@ export function GraphEditor() {
       setSelectedEdgeLabelId(edgeLabelId);
       setNodes((currentNodes) => syncSelectedFlags(currentNodes, nodeIdSet));
       setEdges((currentEdges) => syncSelectedFlags(currentEdges, edgeIdSet));
-      setShowRightSidebar(showInspector ?? hasSelection);
-
       if (typeof window !== "undefined" && !edgeLabelId) {
         window.dispatchEvent(new CustomEvent("icvn:clear-edge-label-selection"));
       }
     },
     [setEdges, setNodes],
   );
-
-  useEffect(() => {
-    setShowRightSidebar(totalSelectionCount > 0 || Boolean(selectedEdgeLabelOwner));
-  }, [selectedEdgeLabelOwner, selectionSignature, totalSelectionCount]);
 
   useEffect(() => {
     if (selectedEdgeLabelId && !selectedEdgeLabelOwner) {
@@ -404,7 +397,6 @@ export function GraphEditor() {
         edgeIds: [detail.edgeId],
         primaryNodeId: null,
         primaryEdgeId: detail.edgeId,
-        showInspector: true,
       });
     };
 
@@ -420,7 +412,6 @@ export function GraphEditor() {
         edgeLabelId: detail.edgeId,
         primaryNodeId: null,
         primaryEdgeId: null,
-        showInspector: true,
       });
       setStatus("已选中说明标签，Delete 将仅删除说明文字。");
     };
@@ -437,6 +428,49 @@ export function GraphEditor() {
   useEffect(() => {
     setIsClientReady(true);
   }, []);
+
+  const loadTaskList = useCallback(
+    async (options?: { highlightTaskId?: string; silent?: boolean }) => {
+      setIsTaskListLoading(true);
+      if (!options?.silent) {
+        setTaskListError(null);
+      }
+
+      try {
+        const response = await openApiClient.listTasks({
+          page: 1,
+          pageSize: 20,
+        });
+
+        setTasks(response.items);
+        setTaskListError(null);
+        setSelectedTaskId((current) => {
+          if (options?.highlightTaskId && response.items.some((task) => task.id === options.highlightTaskId)) {
+            return options.highlightTaskId;
+          }
+
+          if (current && response.items.some((task) => task.id === current)) {
+            return current;
+          }
+
+          return response.items[0]?.id ?? null;
+        });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "暂时无法获取任务列表。";
+        setTaskListError(message);
+        if (!options?.silent) {
+          setStatus(message);
+        }
+      } finally {
+        setIsTaskListLoading(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    void loadTaskList({ silent: true });
+  }, [loadTaskList]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -605,7 +639,6 @@ export function GraphEditor() {
       edgeIds: [],
       primaryNodeId: null,
       primaryEdgeId: null,
-      showInspector: false,
     });
   }, [syncSelectionState]);
 
@@ -954,7 +987,6 @@ export function GraphEditor() {
         edgeIds: [],
         primaryNodeId: nextNode.id,
         primaryEdgeId: null,
-        showInspector: true,
       });
       setStatus(`已添加${shapeOptions.find((item) => item.kind === kind)?.label ?? "图形"}，双击即可输入文字。`);
     },
@@ -989,7 +1021,6 @@ export function GraphEditor() {
       edgeIds: [],
       primaryNodeId: nextNodes[0]?.id ?? null,
       primaryEdgeId: null,
-      showInspector: true,
     });
     copiedNodeRef.current = nextNodes.map((node) => structuredClone(node));
     setStatus(nextNodes.length > 1 ? `已复制 ${nextNodes.length} 个图形。` : "已复制当前图形，可继续拖拽到目标位置。");
@@ -1037,7 +1068,6 @@ export function GraphEditor() {
       edgeIds: [],
       primaryNodeId: nextNodes[0]?.id ?? null,
       primaryEdgeId: null,
-      showInspector: true,
     });
     copiedNodeRef.current = nextNodes.map((node) => structuredClone(node));
     setStatus(nextNodes.length > 1 ? `已粘贴 ${nextNodes.length} 个图形。` : "已粘贴图形副本。");
@@ -1186,18 +1216,6 @@ export function GraphEditor() {
     setIsDocumentImportDialogOpen(true);
   }, []);
 
-  const handleOpenWorkspaceFileJsonEditor = useCallback((fileId: string) => {
-    const targetFile = workspaceFilesRef.current.find((file) => file.id === fileId);
-    if (!targetFile) {
-      return;
-    }
-
-    setSelectedWorkspaceFileId(fileId);
-    setRenameDraft(targetFile.name);
-    setRenamingFileId(null);
-    setIsFileDialogOpen(true);
-  }, []);
-
   const handleCloseFileDialog = useCallback(() => {
     setIsFileDialogOpen(false);
     setRenamingFileId(null);
@@ -1262,17 +1280,44 @@ export function GraphEditor() {
           titleInputRef.current?.select();
         }, 0);
       }
+
+      return nextFile;
     },
     [applyDocument, serializeDocument, syncCurrentFileSnapshot, updateWorkspaceState, writeWorkspaceToStorage],
   );
 
-  const handleCreateFile = useCallback(() => {
-    createWorkspaceCanvas({ openDialog: true, renameInDialog: true });
-  }, [createWorkspaceCanvas]);
+  const createEmptyTaskCanvas = useCallback(
+    async (options?: { focusTitle?: boolean; openDialog?: boolean; renameInDialog?: boolean }) => {
+      const nextFile = createWorkspaceCanvas(options);
 
-  const handleCreateCanvas = useCallback(() => {
-    createWorkspaceCanvas({ focusTitle: true });
-  }, [createWorkspaceCanvas]);
+      try {
+        const task = await openApiClient.createDocumentTask({
+          sourceType: "custom",
+          title: nextFile.name,
+        });
+
+        setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+        setSelectedTaskId(task.id);
+        void loadTaskList({ highlightTaskId: task.id, silent: true });
+        setStatus(`已创建任务《${task.title}》，并切换到新的空白画布。`);
+      } catch (error: unknown) {
+        setStatus(
+          error instanceof Error
+            ? `已创建空白画布，但任务创建失败：${error.message}`
+            : "已创建空白画布，但任务创建失败，请稍后重试。",
+        );
+      }
+    },
+    [createWorkspaceCanvas, loadTaskList],
+  );
+
+  const handleCreateFile = useCallback(async () => {
+    await createEmptyTaskCanvas({ openDialog: true, renameInDialog: true });
+  }, [createEmptyTaskCanvas]);
+
+  const handleCreateCanvas = useCallback(async () => {
+    await createEmptyTaskCanvas({ focusTitle: true });
+  }, [createEmptyTaskCanvas]);
 
   const handleSwitchFile = useCallback(
     (fileId: string) => {
@@ -1468,7 +1513,6 @@ export function GraphEditor() {
       edgeIds: nextEdgeIds,
       primaryNodeId: nextNodeIds[0] ?? null,
       primaryEdgeId: nextEdgeIds[0] ?? null,
-      showInspector: true,
     });
     setStatus(`已全选 ${nextNodeIds.length} 个图形和 ${nextEdgeIds.length} 条连线。`);
   }, [edges, nodes, syncSelectionState]);
@@ -1493,7 +1537,6 @@ export function GraphEditor() {
           edgeIds: [duplicatedEdge.id],
           primaryNodeId: null,
           primaryEdgeId: duplicatedEdge.id,
-          showInspector: true,
         });
         setStatus("这些连接点之间已存在连线，已为你选中现有连线。");
         return;
@@ -1521,7 +1564,6 @@ export function GraphEditor() {
         edgeIds: [nextEdge.id],
         primaryNodeId: null,
         primaryEdgeId: nextEdge.id,
-        showInspector: true,
       });
       setStatus("已新增连线，可双击标签输入说明，也可在右侧继续微调样式。");
     },
@@ -1549,7 +1591,6 @@ export function GraphEditor() {
           edgeIds: [duplicatedEdge.id],
           primaryNodeId: null,
           primaryEdgeId: duplicatedEdge.id,
-          showInspector: true,
         });
         setStatus("目标连接点之间已存在相同的连线，已保留原有连线。");
         return;
@@ -1576,7 +1617,6 @@ export function GraphEditor() {
         edgeIds: [oldEdge.id],
         primaryNodeId: null,
         primaryEdgeId: oldEdge.id,
-        showInspector: true,
       });
       setStatus("已重新挂接连线端点。");
     },
@@ -1666,7 +1706,83 @@ export function GraphEditor() {
     setStatus,
     parseGraphDocument,
     runAutoLayout,
+    onTaskChange: (taskId) => {
+      setSelectedTaskId(taskId);
+      void loadTaskList({ highlightTaskId: taskId, silent: true });
+    },
   });
+
+  const handleLoadTaskToCanvas = useCallback(
+    async (taskId: string) => {
+      setSelectedTaskId(taskId);
+
+      const targetTask = tasks.find((task) => task.id === taskId) ?? null;
+      if (targetTask?.status === "failed") {
+        setStatus(targetTask.errorMessage || `任务《${targetTask.title}》执行失败，暂无可加载结果。`);
+        return;
+      }
+
+      if (targetTask && !["validated", "applied"].includes(targetTask.status)) {
+        setStatus(`任务《${targetTask.title}》当前状态为 ${targetTask.status}，结果暂不可加载。`);
+        void loadTaskList({ highlightTaskId: taskId, silent: true });
+        return;
+      }
+
+      try {
+        const result = await openApiClient.getTaskResult(taskId);
+        if (!result.result?.nodes || !result.result?.edges) {
+          setStatus("任务结果为空，暂时无法加载到画布。");
+          return;
+        }
+
+        const importedDocument = parseGraphDocument(
+          JSON.stringify({
+            data: result.result,
+          }),
+        );
+
+        await runAutoLayout(importedDocument, {
+          start: `正在加载任务《${targetTask?.title ?? taskId}》结果到画布...`,
+          success: `已加载任务《${targetTask?.title ?? taskId}》结果。`,
+          failure: `任务《${targetTask?.title ?? taskId}》结果已加载，但自动布局失败，已保留原始坐标。`,
+        });
+        void loadTaskList({ highlightTaskId: taskId, silent: true });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "任务结果加载失败，请稍后重试。";
+        setStatus(message);
+        void loadTaskList({ highlightTaskId: taskId, silent: true });
+      }
+    },
+    [loadTaskList, runAutoLayout, tasks],
+  );
+
+  const handleDeleteTask = useCallback(
+    async (task: Task) => {
+      if (!window.confirm(`确定删除任务《${task.title}》吗？此操作会删除任务记录、文件信息、解析结果和事件流。`)) {
+        return;
+      }
+
+      setDeletingTaskId(task.id);
+
+      try {
+        await openApiClient.deleteTask(task.id);
+        let nextSelectedTaskId: string | null = null;
+        setTasks((current) => {
+          const remaining = current.filter((item) => item.id !== task.id);
+          nextSelectedTaskId = remaining[0]?.id ?? null;
+          return remaining;
+        });
+        setSelectedTaskId((current) => (current === task.id ? nextSelectedTaskId : current));
+        setStatus(`任务《${task.title}》已删除。`);
+        void loadTaskList({ silent: true });
+      } catch (error: unknown) {
+        setStatus(error instanceof Error ? error.message : "删除任务失败，请稍后重试。");
+      } finally {
+        setDeletingTaskId(null);
+      }
+    },
+    [loadTaskList],
+  );
 
   const handleOpenDocumentImportDialog = useCallback(() => {
     setIsDocumentImportDialogOpen(true);
@@ -2692,7 +2808,7 @@ export function GraphEditor() {
               <div className="flex items-center justify-between border-b border-slate-200 px-3 py-3">
                 <div className="min-w-0">
                   <div className="text-sm font-semibold text-slate-900">工作区</div>
-                  <div className="mt-1 text-xs text-slate-500">图形库 / 文件列表</div>
+                  <div className="mt-1 text-xs text-slate-500">任务列表</div>
                 </div>
                 <Tooltip content="收起工作区" placement="right">
                   <Button
@@ -2707,90 +2823,62 @@ export function GraphEditor() {
                 </Tooltip>
               </div>
 
-              <div className="border-b border-slate-200 px-3 py-3">
-                <div className="flex items-center gap-1">
-                  <div className="min-w-0 flex-1 text-left text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
-                    图形库
-                  </div>
-                  <button
-                    type="button"
-                    aria-expanded={!isShapeLibraryCollapsed}
-                    aria-label={isShapeLibraryCollapsed ? "展开图形库" : "收起图形库"}
-                    className="flex size-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
-                    onClick={() => setIsShapeLibraryCollapsed((current) => !current)}
-                  >
-                    {isShapeLibraryCollapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
-                  </button>
-                </div>
-                {!isShapeLibraryCollapsed ? (
-                  <div className="mt-3 rounded-2xl bg-slate-50/80 p-2">
-                    <div className="grid grid-cols-4 gap-2">
-                      {shapeOptions.map((item) => (
-                        <button
-                          key={item.kind}
-                          type="button"
-                          aria-label={`添加${item.label}`}
-                          className="flex h-12 items-center justify-center rounded-2xl border border-transparent bg-white/80 text-slate-600 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.12)] transition hover:bg-white hover:text-sky-700 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
-                          onClick={() => handleAddShape(item.kind)}
-                        >
-                          <ShapePreview kind={item.kind} />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-
-              <div
-                className={cn(
-                  "px-2 py-3",
-                  isWorkspaceFileListCollapsed ? "shrink-0" : "min-h-0 flex-1 overflow-y-auto",
-                )}
-              >
-                <div className="flex items-center gap-1 px-1">
-                  <div className="min-w-0 flex-1 text-left text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
-                    文件列表（{workspaceFiles.length}）
-                  </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
+                <div className="px-3 pb-4">
                   <NewFileMenuButton
-                    iconOnly
-                    buttonClassName="size-8 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                    label="新建任务/导入文档解析"
+                    buttonClassName="h-11 w-full justify-center rounded-2xl border-slate-200 bg-white text-slate-700 shadow-[0_10px_30px_-24px_rgba(15,23,42,0.45)] hover:bg-slate-50"
                     onCreateCanvas={handleCreateCanvas}
                     onImportDocument={handleOpenDocumentImportDialog}
                   />
-                  <button
-                    type="button"
-                    aria-expanded={!isWorkspaceFileListCollapsed}
-                    aria-label={isWorkspaceFileListCollapsed ? "展开文件列表" : "收起文件列表"}
-                    className="flex size-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
-                    onClick={() => setIsWorkspaceFileListCollapsed((current) => !current)}
-                  >
-                    {isWorkspaceFileListCollapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
-                  </button>
                 </div>
-                {!isWorkspaceFileListCollapsed ? (
-                  <div className="pt-3">
-                    <WorkspaceFileList
-                      files={workspaceFiles}
-                      activeFileId={activeFileId}
-                      selectedFileId={selectedWorkspaceFileId}
-                      renamingFileId={renamingFileId}
-                      renameDraft={renameDraft}
-                      autoFocusRename
-                      variant="explorer"
-                      onSelectFile={handleSelectWorkspaceFile}
-                      onRenameDraftChange={setRenameDraft}
-                      onCancelRename={(fallbackName) => {
-                        setRenamingFileId(null);
-                        setRenameDraft(fallbackName);
-                      }}
-                      onCommitRenameFile={handleCommitRenameWorkspaceFile}
-                      onStartRenameFile={handleStartRenameWorkspaceFile}
-                      onSwitchFile={handleSwitchFile}
-                      onDeleteFile={handleDeleteWorkspaceFile}
-                      onEditJson={handleOpenWorkspaceFileJsonEditor}
+                <div className={cn(isTaskListCollapsed ? "shrink-0" : "min-h-0")}>
+                  <div className="flex items-center gap-1 px-1">
+                    <div className="min-w-0 flex-1 text-left text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
+                      任务列表（{tasks.length}）
+                    </div>
+                    <NewFileMenuButton
+                      iconOnly
+                      buttonClassName="size-8 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                      onCreateCanvas={handleCreateCanvas}
+                      onImportDocument={handleOpenDocumentImportDialog}
                     />
+                    <Tooltip content="刷新任务" placement="bottom">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                        onClick={() => void loadTaskList()}
+                      >
+                        <RefreshCcw className={cn("size-4", isTaskListLoading ? "animate-spin" : undefined)} />
+                      </Button>
+                    </Tooltip>
+                    <button
+                      type="button"
+                      aria-expanded={!isTaskListCollapsed}
+                      aria-label={isTaskListCollapsed ? "展开任务列表" : "收起任务列表"}
+                      className="flex size-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
+                      onClick={() => setIsTaskListCollapsed((current) => !current)}
+                    >
+                      {isTaskListCollapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
+                    </button>
                   </div>
-                ) : null}
+                  {!isTaskListCollapsed ? (
+                    <div className="pt-3">
+                      <TaskList
+                        tasks={tasks}
+                        selectedTaskId={selectedTaskId}
+                        isLoading={isTaskListLoading}
+                        error={taskListError}
+                        onSelectTask={(taskId) => void handleLoadTaskToCanvas(taskId)}
+                        onDeleteTask={(task) => void handleDeleteTask(task)}
+                        deletingTaskId={deletingTaskId}
+                        onRefresh={() => void loadTaskList()}
+                      />
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </div>
           ) : (
@@ -2815,7 +2903,7 @@ export function GraphEditor() {
               />
               <div className="mt-2 h-px w-8 bg-slate-200" />
               <div className="rounded-xl bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-500">
-                {workspaceFiles.length}
+                {tasks.length}
               </div>
             </div>
           )}
@@ -2904,6 +2992,55 @@ export function GraphEditor() {
 
         {showRightSidebar ? (
           <aside className="flex w-[320px] shrink-0 flex-col gap-4 overflow-y-auto border-l border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between rounded-[24px] border border-slate-200 bg-slate-50/70 px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">右侧边栏</div>
+                <div className="mt-1 text-xs text-slate-500">图形库与属性面板</div>
+              </div>
+              <Tooltip content="收起右侧边栏" placement="left">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                  onClick={() => setShowRightSidebar(false)}
+                >
+                  <ChevronRight className="size-4" />
+                </Button>
+              </Tooltip>
+            </div>
+            <section className="rounded-[28px] border border-slate-200 bg-white p-4 shadow-[0_16px_40px_-28px_rgba(15,23,42,0.28)]">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">图形库</h2>
+                  <p className="mt-1 text-sm leading-6 text-slate-500">点击添加图形到画布</p>
+                </div>
+                <button
+                  type="button"
+                  aria-expanded={!isRightShapeLibraryCollapsed}
+                  aria-label={isRightShapeLibraryCollapsed ? "展开右侧图形库" : "收起右侧图形库"}
+                  className="flex size-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
+                  onClick={() => setIsRightShapeLibraryCollapsed((current) => !current)}
+                >
+                  {isRightShapeLibraryCollapsed ? <ChevronRight className="size-4" /> : <ChevronDown className="size-4" />}
+                </button>
+              </div>
+              {!isRightShapeLibraryCollapsed ? (
+                <div className="mt-4 grid grid-cols-4 gap-2">
+                  {shapeOptions.map((item) => (
+                    <button
+                      key={item.kind}
+                      type="button"
+                      aria-label={`添加${item.label}`}
+                      className="flex h-12 items-center justify-center rounded-2xl border border-transparent bg-white/80 text-slate-600 shadow-[inset_0_0_0_1px_rgba(148,163,184,0.12)] transition hover:bg-white hover:text-sky-700 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
+                      onClick={() => handleAddShape(item.kind)}
+                    >
+                      <ShapePreview kind={item.kind} />
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </section>
             {isMultiSelection ? (
               <SectionCard title="批量操作" description="多选时提供统一的删除与复制能力。">
                 <div
@@ -3159,7 +3296,13 @@ export function GraphEditor() {
                   </div>
                 </SectionCard>
               </>
-            ) : null}
+            ) : (
+              <SectionCard title="属性面板" description="选中图形或连线后，这里会显示可编辑配置。">
+                <div className="rounded-[24px] border border-dashed border-slate-200 bg-slate-50/70 px-4 py-5 text-sm leading-6 text-slate-500">
+                  当前未选中对象。右侧保留图形库，选中画布元素后会在这里显示对应设置。
+                </div>
+              </SectionCard>
+            )}
 
             <input
               ref={imageInputRef}
@@ -3169,7 +3312,21 @@ export function GraphEditor() {
               onChange={handleSelectNodeImage}
             />
           </aside>
-        ) : null}
+        ) : (
+          <aside className="flex w-[60px] shrink-0 flex-col items-center gap-2 border-l border-slate-200 bg-white px-2 py-3">
+            <Tooltip content="展开右侧边栏" placement="left">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-10 rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                onClick={() => setShowRightSidebar(true)}
+              >
+                <ChevronLeft className="size-4" />
+              </Button>
+            </Tooltip>
+          </aside>
+        )}
       </div>
 
       {isFileDialogOpen ? (
@@ -3194,6 +3351,7 @@ export function GraphEditor() {
                 </div>
                 <div className="flex items-center gap-2">
                   <NewFileMenuButton
+                    label="新建任务/导入文档解析"
                     buttonClassName="border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                     onCreateCanvas={handleCreateFile}
                     onImportDocument={handleOpenDocumentImportFromFileDialog}
@@ -3300,16 +3458,16 @@ export function GraphEditor() {
           <div
             role="dialog"
             aria-modal="true"
-            aria-label={"导入文档"}
+            aria-label={"新建任务/导入文档解析"}
             className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_28px_120px_-36px_rgba(15,23,42,0.38)]"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="border-b border-slate-200 px-6 py-5">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                  <h2 className="text-lg font-semibold text-slate-900">{"导入文档"}</h2>
+                  <h2 className="text-lg font-semibold text-slate-900">{"新建任务/导入文档解析"}</h2>
                   <p className="mt-1 text-sm leading-6 text-slate-500">
-                    {"支持批量上传原始文档，预留后端清洗、关系抽取与 JSON 结果回写的完整入口。"}
+                    {"通过上传文档或输入文本来创建新任务，支持批量处理、AI 解析和结果入图。"}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -3343,7 +3501,7 @@ export function GraphEditor() {
                   ref={documentImportInputRef}
                   type="file"
                   multiple
-                  accept=".pdf,.doc,.docx,.txt,.md,.markdown,.json,.csv"
+                  accept=".doc,.docx,.txt,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                   className="hidden"
                   onChange={handleDocumentFileInputChange}
                 />
@@ -3367,7 +3525,7 @@ export function GraphEditor() {
                       <div>
                         <h3 className="text-base font-semibold text-slate-900">{"拖拽文档到这里，或从本地批量选择"}</h3>
                         <p className="mt-1 text-sm leading-6 text-slate-500">
-                          {"适合上传 PDF、Word、TXT、Markdown、JSON、CSV 等原始资料，后续可直接接入你的后端清洗服务。"}
+                          {"当前支持上传 .doc、.docx、.txt 文件。"}
                         </p>
                       </div>
                     </div>
@@ -3595,7 +3753,7 @@ export function GraphEditor() {
                       disabled={isDocumentProcessing}
                     >
                       <Plus className="size-4" />
-                      {"创建空白画布"}
+                      {"新建任务"}
                     </Button>
                   </div>
                 </div>

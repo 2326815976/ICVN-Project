@@ -61,7 +61,7 @@ async function waitForServer() {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${BASE_URL}/api/tasks?graphId=default`);
+      const res = await fetch(`${BASE_URL}/api/tasks`);
       if (res.status > 0) return;
     } catch {
       // retry
@@ -125,8 +125,6 @@ async function run() {
     let nodeB;
     let edgeAB;
     let createdTask;
-    let createdVersion;
-
     {
       const section = "API_CONTRACT";
       try {
@@ -162,7 +160,6 @@ async function run() {
         edgeAB = createEdge.json.data;
 
         const createTask = await apiRequest("POST", "/api/tasks", {
-          graphId,
           sourceType: "text",
           title: "测试任务",
           content: "张三和李四参加活动。",
@@ -171,11 +168,17 @@ async function run() {
         assertEnvelope(createTask, true);
         createdTask = createTask.json.data;
 
+        const parseTask = await apiRequest("POST", `/api/tasks/${createdTask.id}/parse`, {
+          content: ["张三和李四参加活动。"],
+        });
+        assert(parseTask.status === 202, `parseTask status ${parseTask.status}`);
+        assertEnvelope(parseTask, true);
+
         const endpoints = [
-          ["GET", `/api/tasks?graphId=${graphId}`, 200],
+          ["GET", `/api/tasks`, 200],
           ["GET", `/api/tasks/${createdTask.id}`, 200],
           ["GET", `/api/tasks/${createdTask.id}/result`, 200],
-          ["POST", `/api/tasks/${createdTask.id}/apply`, 200, { graphId, createSnapshot: true }],
+          ["POST", `/api/tasks/${createdTask.id}/apply`, 200, {}],
           ["GET", `/api/tasks/${createdTask.id}/events`, 200],
           ["PATCH", `/api/graph/nodes/${nodeA.id}`, 200, { label: "Alice Updated" }],
           ["PATCH", `/api/graph/edges/${edgeAB.id}`, 200, { relation: "colleague" }],
@@ -187,10 +190,7 @@ async function run() {
           ["GET", `/api/query/nodes/${nodeA.id}/history?graphId=${graphId}`, 200],
           ["GET", `/api/query/edges/${edgeAB.id}?graphId=${graphId}`, 200],
           ["GET", `/api/query/search?graphId=${graphId}&keyword=Alice`, 200],
-          ["GET", `/api/query/path?graphId=${graphId}&sourceId=${nodeA.id}&targetId=${nodeB.id}&maxDepth=4`, 200],
           ["POST", `/api/query/subgraph`, 200, { graphId, rootIds: [nodeA.id], depth: 2 }],
-          ["POST", `/api/versions`, 201, { graphId, name: "v-test", trigger: "manual", description: "test version" }],
-          ["GET", `/api/versions?graphId=${graphId}`, 200],
         ];
 
         const endpointFailures = [];
@@ -201,31 +201,6 @@ async function run() {
             assertEnvelope(response, status < 400);
           } catch (error) {
             endpointFailures.push(`${method} ${path}: ${error.message}`);
-          }
-        }
-
-        const versionsRes = await apiRequest("GET", `/api/versions?graphId=${graphId}`);
-        createdVersion = versionsRes.json?.data?.items?.[0];
-        if (!createdVersion?.id) {
-          endpointFailures.push("GET /api/versions?graphId=<graphId>: no version found for detail/rollback tests");
-        } else {
-          const getVersionDetail = await apiRequest("GET", `/api/versions/${createdVersion.id}`);
-          try {
-            assert(getVersionDetail.status === 200, `get version detail status ${getVersionDetail.status}`);
-            assertEnvelope(getVersionDetail, true);
-          } catch (error) {
-            endpointFailures.push(`GET /api/versions/{versionId}: ${error.message}`);
-          }
-
-          const rollback = await apiRequest("POST", `/api/versions/${createdVersion.id}/rollback`, {
-            graphId,
-            reason: "test rollback",
-          });
-          try {
-            assert(rollback.status === 200, `rollback status ${rollback.status}`);
-            assertEnvelope(rollback, true);
-          } catch (error) {
-            endpointFailures.push(`POST /api/versions/{versionId}/rollback: ${error.message}`);
           }
         }
 
@@ -241,46 +216,25 @@ async function run() {
         assert(deleteNodeB.status === 200, `delete nodeB status ${deleteNodeB.status}`);
         assertEnvelope(deleteNodeB, true);
 
-        const aiCreate = await apiRequest("POST", "/api/ai/parse", {
-          graphId,
-          sourceType: "news",
-          content: "A 与 B 达成合作。",
+        const tempTask = await apiRequest("POST", "/api/tasks", {
+          sourceType: "text",
+          title: "待删除任务",
+          content: "尚未入图的任务。",
         });
-        try {
-          assert(aiCreate.status === 202, `POST /api/ai/parse expected 202, got ${aiCreate.status}`);
-          assertEnvelope(aiCreate, true);
-        } catch (error) {
-          endpointFailures.push(`POST /api/ai/parse: ${error.message}`);
-        }
+        assert(tempTask.status === 201, `tempTask status ${tempTask.status}`);
+        assertEnvelope(tempTask, true);
 
-        const aiJobId = aiCreate.json?.data?.jobId;
-        if (!aiJobId) {
-          endpointFailures.push("POST /api/ai/parse: missing data.jobId");
-        } else {
-          const aiGet = await apiRequest("GET", `/api/ai/jobs/${aiJobId}`);
-          try {
-            assert(aiGet.status === 200, `GET /api/ai/jobs/{jobId} expected 200, got ${aiGet.status}`);
-            assertEnvelope(aiGet, true);
-          } catch (error) {
-            endpointFailures.push(`GET /api/ai/jobs/{jobId}: ${error.message}`);
-          }
-
-          const aiAttach = await apiRequest("POST", `/api/ai/jobs/${aiJobId}/apply`);
-          try {
-            assert(aiAttach.status === 409, `POST /api/ai/jobs/{jobId}/apply expected 409, got ${aiAttach.status}`);
-            assertEnvelope(aiAttach, false);
-          } catch (error) {
-            endpointFailures.push(`POST /api/ai/jobs/{jobId}/apply: ${error.message}`);
-          }
-        }
+        const deleteTaskResponse = await apiRequest("DELETE", `/api/tasks/${tempTask.json.data.id}`);
+        assert(deleteTaskResponse.status === 200, `delete task status ${deleteTaskResponse.status}`);
+        assertEnvelope(deleteTaskResponse, true);
 
         if (endpointFailures.length > 0) {
           throw new Error(endpointFailures.join(" | "));
         }
 
-        record(section, "OpenAPI 29 endpoints reachable + envelope", true);
+        record(section, "OpenAPI active endpoints reachable + envelope", true);
       } catch (error) {
-        record(section, "OpenAPI 29 endpoints reachable + envelope", false, error.message);
+        record(section, "OpenAPI active endpoints reachable + envelope", false, error.message);
       }
     }
 
@@ -290,7 +244,7 @@ async function run() {
       try {
         assert(createdTask?.id, "task fixture missing");
 
-        const [[taskRow]] = await connection.execute("SELECT status, applied_version_id FROM tasks WHERE id = ?", [createdTask.id]);
+        const [[taskRow]] = await connection.execute("SELECT status, graph_id FROM tasks WHERE id = ?", [createdTask.id]);
         assert(taskRow, "task row missing");
         assert(taskRow.status === "applied", `task status expected applied, got ${taskRow.status}`);
 
@@ -301,11 +255,11 @@ async function run() {
         const eventTypes = eventRows.map((row) => row.event_type);
         assert(eventTypes.includes("uploaded") && eventTypes.includes("applied"), "task event chain incomplete");
 
-        const [historyRows] = await connection.execute("SELECT id FROM graph_change_history WHERE graph_id = ? LIMIT 1", [taskRow.graph_id ?? createdTask.graphId]);
+        const [historyRows] = await connection.execute("SELECT id FROM graph_change_history WHERE graph_id = ? LIMIT 1", [taskRow.graph_id]);
         assert(historyRows.length > 0, "graph change history missing");
 
         const beforeApplyEvents = eventTypes.filter((e) => e === "applied").length;
-        const applyAgain = await apiRequest("POST", `/api/tasks/${createdTask.id}/apply`, { graphId: createdTask.graphId, createSnapshot: true });
+        const applyAgain = await apiRequest("POST", `/api/tasks/${createdTask.id}/apply`, {});
         assert(applyAgain.status === 200, `re-apply status ${applyAgain.status}`);
 
         const [eventRowsAfter] = await connection.execute("SELECT event_type FROM task_events WHERE task_id = ? ORDER BY seq ASC", [createdTask.id]);
@@ -322,14 +276,7 @@ async function run() {
     {
       const section = "E2E_MAIN_FLOW";
       try {
-        const flowGraph = randomId("gflow");
-        await connection.execute(
-          "INSERT INTO graphs (id, name, description, status, created_by) VALUES (?, ?, ?, 'active', 'test-runner')",
-          [flowGraph, `Graph ${flowGraph}`, "flow graph"],
-        );
-
         const createTask = await apiRequest("POST", "/api/tasks", {
-          graphId: flowGraph,
           sourceType: "text",
           title: "E2E Flow",
           content: "王五和赵六共同参与项目。",
@@ -337,26 +284,24 @@ async function run() {
         assert(createTask.status === 201, "e2e create task failed");
         const taskId = createTask.json.data.id;
 
+        const parseTask = await apiRequest("POST", `/api/tasks/${taskId}/parse`, {
+          content: ["王五和赵六共同参与项目。"],
+        });
+        assert(parseTask.status === 202, "e2e parse task failed");
+
         const result = await apiRequest("GET", `/api/tasks/${taskId}/result`);
         assert(result.status === 200, "e2e get result failed");
 
-        const apply = await apiRequest("POST", `/api/tasks/${taskId}/apply`, { graphId: flowGraph, createSnapshot: true });
+        const apply = await apiRequest("POST", `/api/tasks/${taskId}/apply`, {});
         assert(apply.status === 200, "e2e apply failed");
 
-        const view = await apiRequest("GET", `/api/graph/view?graphId=${flowGraph}`);
+        const view = await apiRequest("GET", `/api/graph/view?graphId=default`);
         assert(view.status === 200, "e2e graph view failed");
         assert((view.json.data.nodes ?? []).length >= 1, "e2e graph nodes not created");
 
-        const versions = await apiRequest("GET", `/api/versions?graphId=${flowGraph}`);
-        assert(versions.status === 200 && versions.json.data.items.length >= 1, "e2e versions missing");
-        const versionId = versions.json.data.items[0].id;
-
-        const rollback = await apiRequest("POST", `/api/versions/${versionId}/rollback`, { graphId: flowGraph, reason: "e2e" });
-        assert(rollback.status === 200, "e2e rollback failed");
-
-        record(section, "task apply and version rollback closed loop", true);
+        record(section, "task apply closed loop", true);
       } catch (error) {
-        record(section, "task apply and version rollback closed loop", false, error.message);
+        record(section, "task apply closed loop", false, error.message);
       }
     }
 
@@ -364,9 +309,9 @@ async function run() {
     {
       const section = "API_ERROR_CASES";
       try {
-        const badTasks = await apiRequest("GET", "/api/tasks");
-        assert(badTasks.status === 400, `expected 400, got ${badTasks.status}`);
-        assertEnvelope(badTasks, false);
+        const tasks = await apiRequest("GET", "/api/tasks");
+        assert(tasks.status === 200, `expected 200, got ${tasks.status}`);
+        assertEnvelope(tasks, true);
 
         const badSearch = await apiRequest("GET", "/api/query/search?graphId=default");
         assert(badSearch.status === 400, `expected 400, got ${badSearch.status}`);
@@ -376,9 +321,34 @@ async function run() {
         assert(missingTask.status === 404, `expected 404, got ${missingTask.status}`);
         assertEnvelope(missingTask, false);
 
-        const missingAiJob = await apiRequest("GET", `/api/ai/jobs/${randomId("missing_job")}`);
-        assert(missingAiJob.status === 404, `expected 404, got ${missingAiJob.status}`);
-        assertEnvelope(missingAiJob, false);
+        const missingParseTask = await apiRequest("POST", `/api/tasks/${randomId("missing_task")}/parse`, {
+          content: ["missing"],
+        });
+        assert(missingParseTask.status === 404, `expected 404, got ${missingParseTask.status}`);
+        assertEnvelope(missingParseTask, false);
+
+        const appliedTask = await apiRequest("POST", "/api/tasks", {
+          sourceType: "text",
+          title: "不可删除任务",
+          content: "已入图的任务。",
+        });
+        assert(appliedTask.status === 201, `expected 201, got ${appliedTask.status}`);
+        assertEnvelope(appliedTask, true);
+
+        const appliedTaskId = appliedTask.json.data.id;
+        const parseAppliedTask = await apiRequest("POST", `/api/tasks/${appliedTaskId}/parse`, {
+          content: ["已入图的任务。"],
+        });
+        assert(parseAppliedTask.status === 202, `expected 202, got ${parseAppliedTask.status}`);
+        assertEnvelope(parseAppliedTask, true);
+
+        const applyAppliedTask = await apiRequest("POST", `/api/tasks/${appliedTaskId}/apply`, {});
+        assert(applyAppliedTask.status === 200, `expected 200, got ${applyAppliedTask.status}`);
+        assertEnvelope(applyAppliedTask, true);
+
+        const deleteAppliedTask = await apiRequest("DELETE", `/api/tasks/${appliedTaskId}`);
+        assert(deleteAppliedTask.status === 409, `expected 409, got ${deleteAppliedTask.status}`);
+        assertEnvelope(deleteAppliedTask, false);
 
         record(section, "400/404/409 envelopes", true);
       } catch (error) {

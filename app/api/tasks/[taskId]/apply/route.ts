@@ -1,5 +1,4 @@
-import type { ApplyTaskRequest } from "@/lib/domain/models";
-import { readOptionalJsonBody, runRoute } from "@/lib/server/api";
+import { runRoute } from "@/lib/server/api";
 import { applyTaskResult } from "@/lib/server/repository";
 
 export const runtime = "nodejs";
@@ -11,9 +10,9 @@ type RouteContext = {
 };
 
 export async function POST(request: Request, context: RouteContext) {
+  void request;
   return runRoute(async () => {
     const { taskId } = await context.params;
-    const body = await readOptionalJsonBody<ApplyTaskRequest>(request, {});
-    return applyTaskResult(taskId, body);
+    return applyTaskResult(taskId);
   });
 }

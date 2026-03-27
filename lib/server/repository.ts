@@ -1,22 +1,17 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
 
 import type {
-  AiJob,
-  AiJobAcceptedResponse,
-  AiJobStatus,
   AiParseRequest,
   AiParseResult,
-  ApplyTaskRequest,
+  AiRawParseResponse,
   ChangeHistoryItem,
   CreateEdgeRequest,
   CreateNodeRequest,
   CreateTaskRequest,
-  CreateVersionRequest,
   EdgeDetailResponse,
   EvidenceRecord,
   GraphEdge,
   GraphNode,
-  GraphVersion,
   GraphView,
   JsonValue,
   NodeDetailResponse,
@@ -24,30 +19,29 @@ import type {
   NodeSearchResponse,
   NodeSourcesResponse,
   RelationsResponse,
-  RollbackVersionRequest,
   SourceCreateRequest,
   SourceRecord,
   SubgraphQueryRequest,
   SubgraphResponse,
   Task,
   TaskApplyResponse,
+  TaskDeleteResponse,
   TaskEvent,
   TaskEventListResponse,
   TaskFile,
   TaskListResponse,
+  TaskParseResponse,
   TaskResultResponse,
   TaskSummary,
   UpdateEdgeRequest,
   UpdateNodeRequest,
-  VersionDetailResponse,
-  VersionListResponse,
-  VersionSummary,
 } from "@/lib/domain/models";
-import { ApiError, getDefaultActorId } from "@/lib/server/api";
-import { createAllPaths, createShortestPath, createSubgraph } from "@/lib/server/graph-queries";
+import { ApiError, getDefaultActorId, getDefaultGraphId } from "@/lib/server/api";
+import { createSubgraph } from "@/lib/server/graph-queries";
 import { withConnection, withTransaction } from "@/lib/server/db";
 import {
-  buildSyntheticParseResult,
+  buildGraphResultFromRawAiParseResponse,
+  buildSyntheticRawAiParseResponse,
   coerceRecord,
   coerceStringArray,
   createId,
@@ -59,6 +53,90 @@ import {
 } from "@/lib/server/utils";
 
 type DbRow = RowDataPacket & Record<string, unknown>;
+type ApiEnvelope<T> = {
+  success: boolean;
+  data?: T;
+  error?: {
+    code?: string;
+    message?: string;
+    details?: unknown;
+  };
+};
+
+function buildMockAiParseResponse(params: {
+  taskId: string;
+  title: string;
+  input: AiParseRequest;
+}) {
+  const contents = params.input.content.map((item) => item.trim()).filter((item) => item.length > 0);
+
+  if (contents.length === 0) {
+    throw new ApiError(400, "BAD_REQUEST", "content is required");
+  }
+
+  const mergedContent = contents.join("\n\n");
+
+  // Current stage uses a simulated AI provider, but all callers must still
+  // go through this single AI parsing entry so the task flow matches production shape.
+  return buildSyntheticRawAiParseResponse({
+    taskId: params.taskId,
+    title: params.title,
+    content: mergedContent,
+  });
+}
+
+function getInternalApiBaseUrl() {
+  const configuredBaseUrl =
+    process.env.INTERNAL_API_BASE_URL ??
+    process.env.APP_BASE_URL ??
+    process.env.NEXT_PUBLIC_APP_BASE_URL ??
+    "http://127.0.0.1:3000";
+
+  return configuredBaseUrl.replace(/\/+$/, "");
+}
+
+async function requestAiParseViaHttp(params: {
+  taskId: string;
+  title: string;
+  input: AiParseRequest;
+}) {
+  const response = await fetch(`${getInternalApiBaseUrl()}/api/ai/parse`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    cache: "no-store",
+    body: JSON.stringify({
+      taskId: params.taskId,
+      content: params.input.content,
+    } satisfies AiParseRequest),
+  });
+
+  let payload: ApiEnvelope<AiRawParseResponse> | null = null;
+
+  try {
+    payload = (await response.json()) as ApiEnvelope<AiRawParseResponse>;
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok || !payload?.success || !payload.data) {
+    throw new ApiError(
+      502,
+      "AI_PARSE_REQUEST_FAILED",
+      payload?.error?.message ?? `AI parse request failed with HTTP ${response.status}`,
+      {
+        taskId: params.taskId,
+        baseUrl: getInternalApiBaseUrl(),
+      },
+    );
+  }
+
+  return {
+    ...payload.data,
+    taskId: params.taskId,
+  } satisfies AiRawParseResponse;
+}
 
 function asIsoString(value: unknown) {
   if (value instanceof Date) {
@@ -170,20 +248,6 @@ function mapChangeHistoryItem(row: DbRow): ChangeHistoryItem {
   };
 }
 
-function mapGraphVersion(row: DbRow): GraphVersion {
-  return {
-    id: String(row.id),
-    graphId: String(row.graph_id),
-    versionNo: Number(row.version_no),
-    name: String(row.name),
-    description: row.description ? String(row.description) : null,
-    trigger: row.trigger as GraphVersion["trigger"],
-    snapshotId: String(row.snapshot_id),
-    createdBy: String(row.created_by),
-    createdAt: asIsoString(row.created_at),
-  };
-}
-
 function mapTaskFile(row: DbRow): TaskFile {
   return {
     fileId: String(row.id),
@@ -211,25 +275,13 @@ function buildTaskSummary(row: DbRow): TaskSummary | undefined {
 }
 
 function mapTask(row: DbRow, files: TaskFile[]): Task {
-  const currentVersion =
-    row.version_id && row.version_no
-      ? {
-          versionId: String(row.version_id),
-          versionNo: Number(row.version_no),
-          name: String(row.version_name),
-        }
-      : null;
-
   return {
     id: String(row.id),
-    graphId: String(row.graph_id),
     sourceType: row.source_type as Task["sourceType"],
     title: String(row.title),
     status: row.status as Task["status"],
     files,
-    contentPreview: row.content_preview ? String(row.content_preview) : undefined,
     summary: buildTaskSummary(row),
-    currentVersion,
     errorMessage: row.error_message ? String(row.error_message) : null,
     createdBy: String(row.created_by),
     createdAt: asIsoString(row.created_at),
@@ -245,20 +297,6 @@ function mapTaskEvent(row: DbRow): TaskEvent {
     message: String(row.message),
     payload: fromJsonValue<Record<string, JsonValue>>(row.payload, {}),
     createdAt: asIsoString(row.created_at),
-  };
-}
-
-function mapAiJob(row: DbRow): AiJob {
-  return {
-    id: String(row.id),
-    graphId: String(row.graph_id),
-    taskId: row.task_id ? String(row.task_id) : null,
-    status: String(row.status) as AiJobStatus,
-    inputText: String(row.input_text),
-    result: fromJsonValue<AiParseResult | undefined>(row.result_json, undefined),
-    errorMessage: row.error_message ? String(row.error_message) : null,
-    createdAt: asIsoString(row.created_at),
-    updatedAt: asIsoString(row.updated_at),
   };
 }
 
@@ -296,19 +334,6 @@ async function findEdge(connection: PoolConnection, id: string) {
   return rows[0] ? mapGraphEdge(rows[0]) : null;
 }
 
-async function getAiJobOrThrow(connection: PoolConnection, jobId: string) {
-  const [rows] = await connection.execute<DbRow[]>(
-    "SELECT * FROM ai_jobs WHERE id = :jobId LIMIT 1",
-    { jobId },
-  );
-
-  if (!rows[0]) {
-    throw new ApiError(404, "AI_JOB_NOT_FOUND", "AI job not found");
-  }
-
-  return rows[0];
-}
-
 async function getTaskRow(connection: PoolConnection, taskId: string) {
   const [rows] = await connection.execute<DbRow[]>(
     `
@@ -316,13 +341,9 @@ async function getTaskRow(connection: PoolConnection, taskId: string) {
         t.*,
         tr.node_count,
         tr.edge_count,
-        tr.event_count,
-        gv.id AS version_id,
-        gv.version_no,
-        gv.name AS version_name
+        tr.event_count
       FROM tasks t
       LEFT JOIN task_results tr ON tr.task_id = t.id
-      LEFT JOIN graph_versions gv ON gv.id = t.applied_version_id
       WHERE t.id = :taskId
       LIMIT 1
     `,
@@ -360,6 +381,45 @@ async function getTaskResultRecord(connection: PoolConnection, taskId: string) {
   return rows[0] ?? null;
 }
 
+async function appendTaskEvents(
+  connection: PoolConnection,
+  taskId: string,
+  events: Array<{
+    type: string;
+    message: string;
+    payload?: Record<string, JsonValue>;
+  }>,
+) {
+  if (events.length === 0) {
+    return;
+  }
+
+  const [seqRows] = await connection.execute<DbRow[]>(
+    "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM task_events WHERE task_id = :taskId",
+    { taskId },
+  );
+
+  let nextSeq = Number(seqRows[0]?.max_seq ?? 0);
+
+  for (const event of events) {
+    nextSeq += 1;
+    await connection.execute(
+      `
+        INSERT INTO task_events (id, task_id, seq, event_type, message, payload)
+        VALUES (:id, :taskId, :seq, :eventType, :message, :payload)
+      `,
+      {
+        id: createId("evt"),
+        taskId,
+        seq: nextSeq,
+        eventType: event.type,
+        message: event.message,
+        payload: toJsonString(event.payload ?? {}),
+      },
+    );
+  }
+}
+
 async function loadGraphNodes(connection: PoolConnection, graphId: string) {
   const [rows] = await connection.execute<DbRow[]>(
     "SELECT * FROM graph_nodes WHERE graph_id = :graphId ORDER BY created_at ASC",
@@ -376,29 +436,6 @@ async function loadGraphEdges(connection: PoolConnection, graphId: string) {
   );
 
   return rows.map(mapGraphEdge);
-}
-
-async function getLatestVersionSummary(connection: PoolConnection, graphId: string): Promise<VersionSummary | undefined> {
-  const [rows] = await connection.execute<DbRow[]>(
-    `
-      SELECT id, version_no, name
-      FROM graph_versions
-      WHERE graph_id = :graphId
-      ORDER BY version_no DESC
-      LIMIT 1
-    `,
-    { graphId },
-  );
-
-  if (!rows[0]) {
-    return undefined;
-  }
-
-  return {
-    versionId: String(rows[0].id),
-    versionNo: Number(rows[0].version_no),
-    name: String(rows[0].name),
-  };
 }
 
 async function createSourceRecord(
@@ -533,148 +570,267 @@ async function recordChangeHistory(
   );
 }
 
-async function getGraphSnapshot(connection: PoolConnection, graphId: string) {
-  const [nodes, edges] = await Promise.all([loadGraphNodes(connection, graphId), loadGraphEdges(connection, graphId)]);
+export async function parseTaskContent(taskId: string, input: AiParseRequest) {
+  const contents = input.content.map((item) => item.trim()).filter((item) => item.length > 0);
 
-  return {
-    graphId,
-    nodes,
-    edges,
-  } satisfies GraphView;
-}
-
-async function createVersionRecord(
-  connection: PoolConnection,
-  params: {
-    graphId: string;
-    name: string;
-    description?: string | null;
-    trigger: GraphVersion["trigger"];
-    createdBy?: string;
-  },
-) {
-  const snapshot = await getGraphSnapshot(connection, params.graphId);
-  const snapshotId = createId("snap");
-  const versionId = createId("ver");
-  const createdBy = params.createdBy ?? getDefaultActorId();
-
-  const [versionRows] = await connection.execute<DbRow[]>(
-    "SELECT COALESCE(MAX(version_no), 0) AS version_no FROM graph_versions WHERE graph_id = :graphId",
-    { graphId: params.graphId },
-  );
-
-  const nextVersionNo = Number(versionRows[0]?.version_no ?? 0) + 1;
-  const metadata = {
-    nodeCount: snapshot.nodes.length,
-    edgeCount: snapshot.edges.length,
-    capturedAt: nowIso(),
-  };
-
-  await connection.execute(
-    `
-      INSERT INTO graph_snapshots (id, graph_id, snapshot_json, metadata)
-      VALUES (:id, :graphId, :snapshotJson, :metadata)
-    `,
-    {
-      id: snapshotId,
-      graphId: params.graphId,
-      snapshotJson: toJsonString(snapshot),
-      metadata: toJsonString(metadata),
-    },
-  );
-
-  await connection.execute(
-    `
-      INSERT INTO graph_versions (
-        id, graph_id, version_no, name, description, \`trigger\`, snapshot_id, created_by
-      )
-      VALUES (
-        :id, :graphId, :versionNo, :name, :description, :trigger, :snapshotId, :createdBy
-      )
-    `,
-    {
-      id: versionId,
-      graphId: params.graphId,
-      versionNo: nextVersionNo,
-      name: params.name,
-      description: params.description ?? null,
-      trigger: params.trigger,
-      snapshotId,
-      createdBy,
-    },
-  );
-
-  const [rows] = await connection.execute<DbRow[]>(
-    "SELECT * FROM graph_versions WHERE id = :id LIMIT 1",
-    { id: versionId },
-  );
-
-  if (!rows[0]) {
-    throw new ApiError(500, "VERSION_CREATE_FAILED", "Failed to create graph version");
-  }
-
-  return mapGraphVersion(rows[0]);
-}
-
-export async function createAiParseJob(input: AiParseRequest) {
-  if (!input.content?.trim()) {
+  if (contents.length === 0) {
     throw new ApiError(400, "BAD_REQUEST", "content is required");
   }
 
-  return withTransaction(async (connection) => {
-    await ensureGraph(connection, input.graphId);
+  try {
+    return await withTransaction(async (connection) => {
+      const taskRow = await getTaskRow(connection, taskId);
 
-    const jobId = createId("job");
-    const status: AiJobStatus = "pending";
+      if (!taskRow) {
+        throw new ApiError(404, "TASK_NOT_FOUND", "Task not found");
+      }
 
-    await connection.execute(
-      `
-        INSERT INTO ai_jobs (
-          id, graph_id, task_id, source_type, input_text, status, result_json, error_message, provider, model
-        )
-        VALUES (
-          :id, :graphId, NULL, :sourceType, :inputText, :status, NULL, NULL, NULL, NULL
-        )
-      `,
-      {
-        id: jobId,
-        graphId: input.graphId,
-        sourceType: input.sourceType,
-        inputText: input.content.trim(),
-        status,
-      },
-    );
+      if (String(taskRow.status) === "applied") {
+        throw new ApiError(409, "TASK_NOT_PARSABLE", "Applied task cannot be parsed again");
+      }
 
-    return {
-      jobId,
-      status,
-      taskId: null,
-    } satisfies AiJobAcceptedResponse;
-  });
-}
+      const graphId = String(taskRow.graph_id ?? getDefaultGraphId());
+      const mergedContent = contents.join("\n\n");
+      const contentPreview = truncateText(mergedContent, 200);
 
-export async function getAiJob(jobId: string) {
-  return withConnection(async (connection) => {
-    const row = await getAiJobOrThrow(connection, jobId);
-    return mapAiJob(row);
-  });
-}
+      await ensureGraph(connection, graphId);
+      await connection.execute(
+        `
+          UPDATE tasks
+          SET
+            input_text = :inputText,
+            content_preview = :contentPreview,
+            status = 'processing',
+            error_message = NULL,
+            updated_at = CURRENT_TIMESTAMP(3)
+          WHERE id = :taskId
+        `,
+        {
+          taskId,
+          inputText: mergedContent,
+          contentPreview,
+        },
+      );
 
-export async function attachAiJobResultToTask(jobId: string) {
-  return withTransaction(async (connection) => {
-    const row = await getAiJobOrThrow(connection, jobId);
-    const status = String(row.status) as AiJobStatus;
+      await appendTaskEvents(connection, taskId, [
+        {
+          type: "queued",
+          message: "任务内容已接收，已进入 AI 解析队列。",
+          payload: { status: "queued" },
+        },
+        {
+          type: "processing",
+          message: "AI 原始结果正在生成。",
+          payload: { status: "processing" },
+        },
+      ]);
 
-    if (status !== "validated" && status !== "applied") {
-      throw new ApiError(409, "AI_JOB_NOT_READY", "AI job is not ready to attach");
+      const rawResult = await requestAiParseViaHttp({
+        taskId,
+        title: String(taskRow.title),
+        input: {
+          taskId,
+          content: contents,
+        },
+      });
+      const result = buildGraphResultFromRawAiParseResponse({
+        graphId,
+        taskId,
+        sourceType: taskRow.source_type as Task["sourceType"],
+        rawResult,
+      });
+
+      await connection.execute(
+        `
+          INSERT INTO task_results (
+            id, task_id, raw_result, normalized_result, node_count, edge_count, event_count
+          )
+          VALUES (
+            :id, :taskId, :rawResult, :normalizedResult, :nodeCount, :edgeCount, :eventCount
+          )
+          ON DUPLICATE KEY UPDATE
+            raw_result = VALUES(raw_result),
+            normalized_result = VALUES(normalized_result),
+            node_count = VALUES(node_count),
+            edge_count = VALUES(edge_count),
+            event_count = VALUES(event_count),
+            updated_at = CURRENT_TIMESTAMP(3)
+        `,
+        {
+          id: createId("trs"),
+          taskId,
+          rawResult: toJsonString(rawResult),
+          normalizedResult: toJsonString(result),
+          nodeCount: result.nodes.length,
+          edgeCount: result.edges.length,
+          eventCount: result.events.length,
+        },
+      );
+      await connection.execute(
+        `
+          UPDATE tasks
+          SET
+            status = 'validated',
+            error_message = NULL,
+            updated_at = CURRENT_TIMESTAMP(3)
+          WHERE id = :taskId
+        `,
+        {
+          taskId,
+        },
+      );
+
+      await appendTaskEvents(connection, taskId, [
+        {
+          type: "validated",
+          message: "AI 原始结果与图谱结构化结果已生成。",
+          payload: { status: "validated" },
+        },
+      ]);
+
+      return {
+        taskId,
+        status: "validated",
+      } satisfies TaskParseResponse;
+    });
+  } catch (error) {
+    if (!(error instanceof ApiError && error.status === 404)) {
+      await withTransaction(async (connection) => {
+        const taskRow = await getTaskRow(connection, taskId);
+        if (!taskRow || String(taskRow.status) === "applied") {
+          return;
+        }
+
+        const errorMessage = truncateText(
+          error instanceof Error ? error.message : "Task parse failed",
+          500,
+        );
+
+        await connection.execute(
+          `
+            UPDATE tasks
+            SET
+              status = 'failed',
+              error_message = :errorMessage,
+              updated_at = CURRENT_TIMESTAMP(3)
+            WHERE id = :taskId
+          `,
+          {
+            taskId,
+            errorMessage,
+          },
+        );
+
+        await appendTaskEvents(connection, taskId, [
+          {
+            type: "failed",
+            message: "任务处理失败。",
+            payload: { status: "failed", error: errorMessage },
+          },
+        ]);
+      });
     }
 
-    return {
-      jobId: String(row.id),
-      status,
-      taskId: row.task_id ? String(row.task_id) : null,
-    };
+    throw error;
+  }
+}
+
+async function applyResultToGraph(
+  connection: PoolConnection,
+  params: {
+    taskId: string;
+    title: string;
+    graphId: string;
+    contentPreview?: string;
+    result: AiParseResult;
+  },
+) {
+  await ensureGraph(connection, params.graphId);
+
+  for (const node of [...params.result.nodes, ...params.result.events].map((item) => ({
+    ...item,
+    graphId: params.graphId,
+  }))) {
+    await upsertNode(connection, node);
+    await recordChangeHistory(connection, {
+      graphId: params.graphId,
+      entityType: "node",
+      entityId: node.id,
+      action: "create",
+      newValue: node,
+    });
+  }
+
+  for (const edge of params.result.edges.map((item) => ({ ...item, graphId: params.graphId }))) {
+    await upsertEdge(connection, edge);
+    await recordChangeHistory(connection, {
+      graphId: params.graphId,
+      entityType: "edge",
+      entityId: edge.id,
+      action: "create",
+      newValue: edge,
+    });
+  }
+
+  const source = await createSourceRecord(connection, params.graphId, {
+    sourceType: "task",
+    sourceRefId: params.taskId,
+    title: params.title,
+    content: params.contentPreview ?? params.result.meta.summary ?? params.title,
   });
+
+  if (source) {
+    for (const node of [...params.result.nodes, ...params.result.events]) {
+      await linkEntitySource(connection, {
+        graphId: params.graphId,
+        entityType: "node",
+        entityId: node.id,
+        sourceRecordId: source.id,
+      });
+    }
+
+    for (const edge of params.result.edges) {
+      await linkEntitySource(connection, {
+        graphId: params.graphId,
+        entityType: "edge",
+        entityId: edge.id,
+        sourceRecordId: source.id,
+      });
+
+      await createEvidence(connection, {
+        graphId: params.graphId,
+        sourceRecordId: source.id,
+        subjectNodeId: edge.sourceId,
+        targetNodeId: edge.targetId,
+        edgeId: edge.id,
+        relation: edge.relation,
+        excerpt: params.result.meta.summary ?? params.contentPreview ?? `${params.title} 的结构化关系`,
+      });
+    }
+  }
+
+  await connection.execute(
+    `
+      UPDATE tasks
+      SET
+        status = 'applied',
+        error_message = NULL,
+        updated_at = CURRENT_TIMESTAMP(3)
+      WHERE id = :taskId
+    `,
+    {
+      taskId: params.taskId,
+    },
+  );
+
+  await appendTaskEvents(connection, params.taskId, [
+    { type: "applied", message: "任务结果已入图。", payload: { status: "applied" } },
+  ]);
+
+  return {
+    taskId: params.taskId,
+    status: "applied",
+  } satisfies TaskApplyResponse;
 }
 
 async function upsertNode(connection: PoolConnection, node: GraphNode) {
@@ -796,12 +952,9 @@ async function cleanupNodeAssociations(connection: PoolConnection, nodeIds: stri
 }
 
 export async function createTask(input: CreateTaskRequest) {
-  if (!input.content && (!input.files || input.files.length === 0)) {
-    throw new ApiError(400, "BAD_REQUEST", "Either content or files is required");
-  }
-
   return withTransaction(async (connection) => {
-    await ensureGraph(connection, input.graphId);
+    const graphId = getDefaultGraphId();
+    await ensureGraph(connection, graphId);
 
     const taskId = createId("task");
     const contentPreview = truncateText(
@@ -810,15 +963,7 @@ export async function createTask(input: CreateTaskRequest) {
         input.title,
       200,
     );
-    const result = buildSyntheticParseResult({
-      graphId: input.graphId,
-      taskId,
-      title: input.title,
-      sourceType: input.sourceType,
-      content: input.content,
-      language: input.options?.language,
-    });
-    const status: Task["status"] = "validated";
+    const status: Task["status"] = "uploaded";
 
     await connection.execute(
       `
@@ -833,10 +978,10 @@ export async function createTask(input: CreateTaskRequest) {
       `,
       {
         id: taskId,
-        graphId: input.graphId,
+        graphId,
         sourceType: input.sourceType,
         title: input.title,
-        inputText: input.content ?? null,
+        inputText: input.content?.trim() || null,
         contentPreview,
         status,
         idempotencyKey: createId("idem"),
@@ -861,69 +1006,29 @@ export async function createTask(input: CreateTaskRequest) {
       );
     }
 
-    await connection.execute(
-      `
-        INSERT INTO task_results (
-          id, task_id, raw_result, normalized_result, node_count, edge_count, event_count
-        )
-        VALUES (
-          :id, :taskId, :rawResult, :normalizedResult, :nodeCount, :edgeCount, :eventCount
-        )
-      `,
-      {
-        id: createId("trs"),
-        taskId,
-        rawResult: toJsonString(result),
-        normalizedResult: toJsonString(result),
-        nodeCount: result.nodes.length,
-        edgeCount: result.edges.length,
-        eventCount: result.events.length,
-      },
-    );
-
-    const eventSeed = [
-      { type: "uploaded", message: "任务已创建，原始内容已接收。", payload: { status: "uploaded" } },
-      { type: "queued", message: "任务已进入标准化队列。", payload: { status: "queued" } },
-      { type: "processing", message: "系统已完成结构化解析。", payload: { status: "processing" } },
-      { type: "validated", message: "任务结果已通过后端校验，可执行入图。", payload: { status: "validated" } },
-    ] as const;
-
-    for (const [index, event] of eventSeed.entries()) {
-      await connection.execute(
-        `
-          INSERT INTO task_events (id, task_id, seq, event_type, message, payload)
-          VALUES (:id, :taskId, :seq, :eventType, :message, :payload)
-        `,
-        {
-          id: createId("evt"),
-          taskId,
-          seq: index + 1,
-          eventType: event.type,
-          message: event.message,
-          payload: toJsonString(event.payload),
-        },
-      );
-    }
+    await appendTaskEvents(connection, taskId, [
+      { type: "uploaded", message: "任务已创建，等待提交解析内容。", payload: { status: "uploaded" } },
+    ]);
 
     return getTaskOrThrow(connection, taskId);
   });
 }
 
 export async function listTasks(params: {
-  graphId: string;
   status?: string | null;
   sourceType?: string | null;
   page: number;
   pageSize: number;
 }) {
   return withConnection(async (connection) => {
+    const graphId = getDefaultGraphId();
     const clauses = ["t.graph_id = :graphId"];
     const queryParams: {
       graphId: string;
       status?: string;
       sourceType?: string;
     } = {
-      graphId: params.graphId,
+      graphId,
     };
 
     if (params.status) {
@@ -942,13 +1047,9 @@ export async function listTasks(params: {
           t.*,
           tr.node_count,
           tr.edge_count,
-          tr.event_count,
-          gv.id AS version_id,
-          gv.version_no,
-          gv.name AS version_name
+          tr.event_count
         FROM tasks t
         LEFT JOIN task_results tr ON tr.task_id = t.id
-        LEFT JOIN graph_versions gv ON gv.id = t.applied_version_id
         WHERE ${clauses.join(" AND ")}
         ORDER BY t.created_at DESC
       `,
@@ -981,6 +1082,23 @@ export async function getTaskDetail(taskId: string) {
   return withConnection(async (connection) => getTaskOrThrow(connection, taskId));
 }
 
+export async function deleteTask(taskId: string) {
+  return withTransaction(async (connection) => {
+    const task = await getTaskOrThrow(connection, taskId);
+
+    if (task.status === "applied") {
+      throw new ApiError(409, "TASK_DELETE_FORBIDDEN", "Applied task cannot be deleted");
+    }
+
+    await connection.execute("DELETE FROM tasks WHERE id = :taskId", { taskId });
+
+    return {
+      id: taskId,
+      deleted: true,
+    } satisfies TaskDeleteResponse;
+  });
+}
+
 export async function getTaskResult(taskId: string) {
   return withConnection(async (connection) => {
     const task = await getTaskOrThrow(connection, taskId);
@@ -998,26 +1116,37 @@ export async function getTaskResult(taskId: string) {
   });
 }
 
-export async function applyTaskResult(taskId: string, input: ApplyTaskRequest) {
+export async function aiParseContent(input: AiParseRequest) {
+  const taskId = input.taskId?.trim() || createId("task_preview");
+
+  return buildMockAiParseResponse({
+    taskId,
+    title: truncateText(input.content.join("\n\n").trim(), 40) || "AI 解析预览",
+    input,
+  });
+}
+
+export async function applyTaskResult(taskId: string) {
   return withTransaction(async (connection) => {
     const task = await getTaskOrThrow(connection, taskId);
-    const graphId = input.graphId ?? task.graphId;
 
-    if (task.status === "applied" && task.currentVersion) {
-      const [versionRows] = await connection.execute<DbRow[]>(
-        "SELECT * FROM graph_versions WHERE id = :id LIMIT 1",
-        { id: task.currentVersion.versionId },
-      );
-
+    if (task.status === "applied") {
       return {
         taskId,
         status: "applied",
-        version: versionRows[0] ? mapGraphVersion(versionRows[0]) : undefined,
       } satisfies TaskApplyResponse;
     }
 
-    if (task.status !== "validated" && task.status !== "applied") {
-      throw new ApiError(409, "TASK_NOT_APPLICABLE", "Task must be validated before applying");
+    if (task.status === "processing" || task.status === "queued") {
+      throw new ApiError(409, "TASK_NOT_APPLICABLE", "Task is still processing");
+    }
+
+    if (task.status === "failed") {
+      throw new ApiError(409, "TASK_NOT_APPLICABLE", "Task failed and cannot be applied");
+    }
+
+    if (task.status === "uploaded") {
+      throw new ApiError(409, "TASK_NOT_APPLICABLE", "Task must be parsed before applying");
     }
 
     const resultRecord = await getTaskResultRecord(connection, taskId);
@@ -1027,116 +1156,17 @@ export async function applyTaskResult(taskId: string, input: ApplyTaskRequest) {
       throw new ApiError(409, "TASK_RESULT_NOT_READY", "Task result is not available");
     }
 
-    await ensureGraph(connection, graphId);
-
-    for (const node of [...result.nodes, ...result.events].map((item) => ({ ...item, graphId }))) {
-      await upsertNode(connection, node);
-      await recordChangeHistory(connection, {
-        graphId,
-        entityType: "node",
-        entityId: node.id,
-        action: "create",
-        newValue: node,
-      });
-    }
-
-    for (const edge of result.edges.map((item) => ({ ...item, graphId }))) {
-      await upsertEdge(connection, edge);
-      await recordChangeHistory(connection, {
-        graphId,
-        entityType: "edge",
-        entityId: edge.id,
-        action: "create",
-        newValue: edge,
-      });
-    }
-
-    const source = await createSourceRecord(connection, graphId, {
-      sourceType: "task",
-      sourceRefId: taskId,
+    const applied = await applyResultToGraph(connection, {
+      taskId,
       title: task.title,
-      content: task.contentPreview ?? result.meta.summary ?? task.title,
+      graphId: getDefaultGraphId(),
+      contentPreview: undefined,
+      result,
     });
-
-    if (source) {
-      for (const node of [...result.nodes, ...result.events]) {
-        await linkEntitySource(connection, {
-          graphId,
-          entityType: "node",
-          entityId: node.id,
-          sourceRecordId: source.id,
-        });
-      }
-
-      for (const edge of result.edges) {
-        await linkEntitySource(connection, {
-          graphId,
-          entityType: "edge",
-          entityId: edge.id,
-          sourceRecordId: source.id,
-        });
-
-        await createEvidence(connection, {
-          graphId,
-          sourceRecordId: source.id,
-          subjectNodeId: edge.sourceId,
-          targetNodeId: edge.targetId,
-          edgeId: edge.id,
-          relation: edge.relation,
-          excerpt: result.meta.summary ?? task.contentPreview ?? `${task.title} 的结构化关系`,
-        });
-      }
-    }
-
-    let version: GraphVersion | undefined;
-    if (input.createSnapshot ?? true) {
-      version = await createVersionRecord(connection, {
-        graphId,
-        name: input.versionName ?? `ai-import-${new Date().toISOString().slice(0, 10)}`,
-        description: `Applied from task ${taskId}`,
-        trigger: "ai-import",
-      });
-    }
-
-    await connection.execute(
-      `
-        UPDATE tasks
-        SET
-          status = 'applied',
-          applied_version_id = :versionId,
-          updated_at = CURRENT_TIMESTAMP(3)
-        WHERE id = :taskId
-      `,
-      {
-        taskId,
-        versionId: version?.id ?? null,
-      },
-    );
-
-    const [seqRows] = await connection.execute<DbRow[]>(
-      "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM task_events WHERE task_id = :taskId",
-      { taskId },
-    );
-    await connection.execute(
-      `
-        INSERT INTO task_events (id, task_id, seq, event_type, message, payload)
-        VALUES (:id, :taskId, :seq, 'applied', :message, :payload)
-      `,
-      {
-        id: createId("evt"),
-        taskId,
-        seq: Number(seqRows[0]?.max_seq ?? 0) + 1,
-        message: version ? "任务结果已入图，并生成新版本。" : "任务结果已入图。",
-        payload: toJsonString({
-          versionId: version?.id ?? null,
-        }),
-      },
-    );
 
     return {
       taskId,
-      status: "applied",
-      version,
+      status: applied.status,
     } satisfies TaskApplyResponse;
   });
 }
@@ -1446,17 +1476,12 @@ export async function deleteGraphEdge(id: string, graphId?: string | null) {
 export async function getGraphView(graphId: string) {
   return withConnection(async (connection) => {
     await ensureGraph(connection, graphId);
-    const [nodes, edges, version] = await Promise.all([
-      loadGraphNodes(connection, graphId),
-      loadGraphEdges(connection, graphId),
-      getLatestVersionSummary(connection, graphId),
-    ]);
+    const [nodes, edges] = await Promise.all([loadGraphNodes(connection, graphId), loadGraphEdges(connection, graphId)]);
 
     return {
       graphId,
       nodes,
       edges,
-      version,
     } satisfies GraphView;
   });
 }
@@ -1739,33 +1764,6 @@ export async function searchNodes(params: {
   });
 }
 
-export async function queryPath(params: {
-  graphId: string;
-  sourceId: string;
-  targetId: string;
-  maxDepth: number;
-  strategy: "shortest" | "all";
-}) {
-  return withConnection(async (connection) => {
-    const [nodes, edges] = await Promise.all([
-      loadGraphNodes(connection, params.graphId),
-      loadGraphEdges(connection, params.graphId),
-    ]);
-    const data = { graphId: params.graphId, nodes, edges };
-
-    const paths =
-      params.strategy === "all"
-        ? createAllPaths(data, params.sourceId, params.targetId, params.maxDepth)
-        : [createShortestPath(data, params.sourceId, params.targetId, params.maxDepth)].filter(
-            (item): item is NonNullable<ReturnType<typeof createShortestPath>> => Boolean(item),
-          );
-
-    return {
-      paths,
-    };
-  });
-}
-
 export async function querySubgraph(input: SubgraphQueryRequest) {
   return withConnection(async (connection) => {
     const [nodes, edges] = await Promise.all([loadGraphNodes(connection, input.graphId), loadGraphEdges(connection, input.graphId)]);
@@ -1778,125 +1776,5 @@ export async function querySubgraph(input: SubgraphQueryRequest) {
       },
       input,
     ) satisfies SubgraphResponse;
-  });
-}
-
-export async function createVersion(input: CreateVersionRequest) {
-  return withTransaction(async (connection) => {
-    await ensureGraph(connection, input.graphId);
-    return createVersionRecord(connection, {
-      graphId: input.graphId,
-      name: input.name,
-      description: input.description,
-      trigger: input.trigger,
-    });
-  });
-}
-
-export async function listVersions(graphId: string, page: number, pageSize: number) {
-  return withConnection(async (connection) => {
-    const [rows] = await connection.execute<DbRow[]>(
-      `
-        SELECT *
-        FROM graph_versions
-        WHERE graph_id = :graphId
-        ORDER BY version_no DESC
-      `,
-      { graphId },
-    );
-
-    return paginate(rows.map(mapGraphVersion), page, pageSize) satisfies VersionListResponse;
-  });
-}
-
-export async function getVersionDetail(versionId: string) {
-  return withConnection(async (connection) => {
-    const { version, snapshotRow } = await getVersionWithSnapshot(connection, versionId);
-
-    const metadata = fromJsonValue<{ nodeCount: number; edgeCount: number; capturedAt: string } | undefined>(
-      snapshotRow?.metadata,
-      undefined,
-    );
-
-    return {
-      version,
-      snapshotSummary: metadata,
-      diff: null,
-    } satisfies VersionDetailResponse;
-  });
-}
-
-async function getVersionWithSnapshot(connection: PoolConnection, versionId: string) {
-  const [versionRows] = await connection.execute<DbRow[]>(
-    "SELECT * FROM graph_versions WHERE id = :id LIMIT 1",
-    { id: versionId },
-  );
-
-  if (!versionRows[0]) {
-    throw new ApiError(404, "VERSION_NOT_FOUND", "Version not found");
-  }
-
-  const version = mapGraphVersion(versionRows[0]);
-  const [snapshotRows] = await connection.execute<DbRow[]>(
-    "SELECT * FROM graph_snapshots WHERE id = :id LIMIT 1",
-    { id: version.snapshotId },
-  );
-
-  return {
-    version,
-    snapshotRow: snapshotRows[0] ?? null,
-  };
-}
-
-export async function rollbackVersion(versionId: string, input: RollbackVersionRequest) {
-  return withTransaction(async (connection) => {
-    const { version, snapshotRow } = await getVersionWithSnapshot(connection, versionId);
-
-    if (version.graphId !== input.graphId) {
-      throw new ApiError(409, "VERSION_GRAPH_MISMATCH", "Version does not belong to the specified graph");
-    }
-
-    const snapshot = fromJsonValue<GraphView | undefined>(snapshotRow?.snapshot_json, undefined);
-
-    if (!snapshot) {
-      throw new ApiError(409, "SNAPSHOT_NOT_FOUND", "Snapshot payload is missing");
-    }
-
-    const existingEdges = await loadGraphEdges(connection, input.graphId);
-    if (existingEdges.length > 0) {
-      await deleteEdgesAndAssociations(
-        connection,
-        existingEdges.map((edge) => edge.id),
-      );
-    }
-
-    const existingNodes = await loadGraphNodes(connection, input.graphId);
-    if (existingNodes.length > 0) {
-      await cleanupNodeAssociations(
-        connection,
-        existingNodes.map((node) => node.id),
-      );
-      await connection.execute("DELETE FROM graph_nodes WHERE graph_id = :graphId", { graphId: input.graphId });
-    }
-
-    for (const node of snapshot.nodes) {
-      await upsertNode(connection, node);
-    }
-
-    for (const edge of snapshot.edges) {
-      await upsertEdge(connection, edge);
-    }
-
-    const newVersion = await createVersionRecord(connection, {
-      graphId: input.graphId,
-      name: `rollback-${version.versionNo}`,
-      description: input.reason ?? `Rollback from ${version.id}`,
-      trigger: "rollback",
-    });
-
-    return {
-      rolledBackFrom: versionId,
-      newVersion,
-    };
   });
 }

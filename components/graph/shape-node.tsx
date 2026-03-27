@@ -267,7 +267,7 @@ export function ShapeNode({ id, data, selected, width, height }: NodeProps<AppNo
         </div>
       ) : null}
       {hasText ? (
-        <div className="max-w-full whitespace-pre-wrap break-words text-base font-medium leading-6">
+        <div className="max-w-full whitespace-pre-wrap break-all text-base font-medium leading-6">
           {nodeData.text}
         </div>
       ) : selected ? (

@@ -58,54 +58,6 @@ CREATE TABLE IF NOT EXISTS `graph_edges` (
   CONSTRAINT `fk_graph_edges_target` FOREIGN KEY (`target_id`) REFERENCES `graph_nodes` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS `graph_snapshots` (
-  `id` VARCHAR(64) NOT NULL,
-  `graph_id` VARCHAR(64) NOT NULL,
-  `snapshot_json` JSON NOT NULL,
-  `metadata` JSON NULL,
-  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  KEY `idx_graph_snapshots_graph` (`graph_id`),
-  CONSTRAINT `fk_graph_snapshots_graph` FOREIGN KEY (`graph_id`) REFERENCES `graphs` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS `graph_versions` (
-  `id` VARCHAR(64) NOT NULL,
-  `graph_id` VARCHAR(64) NOT NULL,
-  `version_no` INT NOT NULL,
-  `name` VARCHAR(255) NOT NULL,
-  `description` TEXT NULL,
-  `trigger` VARCHAR(32) NOT NULL,
-  `snapshot_id` VARCHAR(64) NOT NULL,
-  `created_by` VARCHAR(64) NOT NULL,
-  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uniq_graph_versions_graph_version_no` (`graph_id`, `version_no`),
-  UNIQUE KEY `uniq_graph_versions_snapshot_id` (`snapshot_id`),
-  KEY `idx_graph_versions_graph_created` (`graph_id`, `created_at`),
-  CONSTRAINT `fk_graph_versions_graph` FOREIGN KEY (`graph_id`) REFERENCES `graphs` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `fk_graph_versions_snapshot` FOREIGN KEY (`snapshot_id`) REFERENCES `graph_snapshots` (`id`) ON DELETE RESTRICT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS `ai_jobs` (
-  `id` VARCHAR(64) NOT NULL,
-  `graph_id` VARCHAR(64) NOT NULL,
-  `task_id` VARCHAR(64) NULL,
-  `source_type` VARCHAR(32) NOT NULL,
-  `input_text` LONGTEXT NOT NULL,
-  `status` VARCHAR(32) NOT NULL,
-  `result_json` JSON NULL,
-  `error_message` TEXT NULL,
-  `provider` VARCHAR(128) NULL,
-  `model` VARCHAR(128) NULL,
-  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  KEY `idx_ai_jobs_graph` (`graph_id`),
-  KEY `idx_ai_jobs_task` (`task_id`),
-  CONSTRAINT `fk_ai_jobs_graph` FOREIGN KEY (`graph_id`) REFERENCES `graphs` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 CREATE TABLE IF NOT EXISTS `tasks` (
   `id` VARCHAR(64) NOT NULL,
   `graph_id` VARCHAR(64) NOT NULL,
@@ -116,19 +68,13 @@ CREATE TABLE IF NOT EXISTS `tasks` (
   `status` VARCHAR(32) NOT NULL,
   `error_message` TEXT NULL,
   `idempotency_key` VARCHAR(128) NULL,
-  `ai_job_id` VARCHAR(64) NULL,
-  `applied_version_id` VARCHAR(64) NULL,
   `created_by` VARCHAR(64) NOT NULL,
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_tasks_idempotency_key` (`idempotency_key`),
   KEY `idx_tasks_graph_status` (`graph_id`, `status`, `created_at`),
-  KEY `idx_tasks_ai_job` (`ai_job_id`),
-  KEY `idx_tasks_applied_version` (`applied_version_id`),
-  CONSTRAINT `fk_tasks_graph` FOREIGN KEY (`graph_id`) REFERENCES `graphs` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `fk_tasks_ai_job` FOREIGN KEY (`ai_job_id`) REFERENCES `ai_jobs` (`id`) ON DELETE SET NULL,
-  CONSTRAINT `fk_tasks_applied_version` FOREIGN KEY (`applied_version_id`) REFERENCES `graph_versions` (`id`) ON DELETE SET NULL
+  CONSTRAINT `fk_tasks_graph` FOREIGN KEY (`graph_id`) REFERENCES `graphs` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `task_files` (

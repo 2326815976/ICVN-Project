@@ -4,16 +4,19 @@ import {
   Check,
   ChevronDown,
   FileJson,
+  FileText,
   Files,
   MoreHorizontal,
   Pencil,
   Plus,
+  RefreshCcw,
   Trash2,
   Upload,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import type { Task, TaskSourceType } from "@/lib/domain/models";
 import { cn } from "@/lib/utils";
 
 import type { ShapeNodeKind } from "./graph/sample-graph";
@@ -39,6 +42,25 @@ export function formatWorkspaceTime(timestamp: string) {
     }).format(new Date(timestamp));
   } catch {
     return timestamp;
+  }
+}
+
+export function getTaskSourceTypeLabel(sourceType: TaskSourceType) {
+  switch (sourceType) {
+    case "document":
+      return "文档";
+    case "text":
+      return "文本";
+    case "news":
+      return "新闻";
+    case "social":
+      return "社交";
+    case "story":
+      return "故事";
+    case "custom":
+      return "自定义";
+    default:
+      return sourceType;
   }
 }
 
@@ -75,6 +97,7 @@ type NewFileMenuButtonProps = {
   align?: "left" | "right";
   buttonClassName?: string;
   iconOnly?: boolean;
+  label?: string;
   onCreateCanvas: () => void;
   onImportDocument: () => void;
 };
@@ -83,6 +106,7 @@ export function NewFileMenuButton({
   align = "right",
   buttonClassName,
   iconOnly = false,
+  label = "新建任务/导入文档解析",
   onCreateCanvas,
   onImportDocument,
 }: NewFileMenuButtonProps) {
@@ -165,7 +189,7 @@ export function NewFileMenuButton({
         <Plus className="size-4" />
         {!iconOnly ? (
           <>
-            新建文件
+            {label}
             <ChevronDown className={cn("size-4 transition-transform", isOpen ? "rotate-180" : undefined)} />
           </>
         ) : null}
@@ -186,7 +210,7 @@ export function NewFileMenuButton({
             }}
           >
             <Plus className="size-4" />
-            新建画布
+            新建任务
           </button>
           <button
             type="button"
@@ -197,7 +221,7 @@ export function NewFileMenuButton({
             }}
           >
             <Upload className="size-4" />
-            导入文档
+            导入文档解析
           </button>
         </div>
       ) : null}
@@ -579,6 +603,165 @@ export function WorkspaceFileList({
                 删除
               </Button>
             </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+type TaskListProps = {
+  tasks: Task[];
+  selectedTaskId: string | null;
+  isLoading?: boolean;
+  error?: string | null;
+  className?: string;
+  onSelectTask: (taskId: string) => void;
+  onDeleteTask?: (task: Task) => void;
+  deletingTaskId?: string | null;
+  onRefresh?: () => void;
+};
+
+export function TaskList({
+  tasks,
+  selectedTaskId,
+  isLoading = false,
+  error,
+  className,
+  onSelectTask,
+  onDeleteTask,
+  deletingTaskId,
+  onRefresh,
+}: TaskListProps) {
+  if (isLoading && tasks.length === 0) {
+    return (
+      <div className={cn("space-y-3", className)}>
+        {Array.from({ length: 3 }).map((_, index) => (
+          <div
+            key={`task-skeleton-${index}`}
+            className="animate-pulse rounded-[24px] border border-slate-200 bg-white p-4"
+          >
+            <div className="h-4 w-2/3 rounded-full bg-slate-200" />
+            <div className="mt-3 h-3 w-1/3 rounded-full bg-slate-100" />
+            <div className="mt-4 h-2 rounded-full bg-slate-100" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (error && tasks.length === 0) {
+    return (
+      <div
+        className={cn(
+          "rounded-[24px] border border-rose-200 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-700",
+          className,
+        )}
+      >
+        <div className="font-medium">任务列表加载失败</div>
+        <p className="mt-1">{error}</p>
+        {onRefresh ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="mt-3 border-rose-200 bg-white text-rose-700 hover:bg-rose-100"
+            onClick={onRefresh}
+          >
+            <RefreshCcw className="size-4" />
+            重试
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (tasks.length === 0) {
+    return (
+      <div
+        className={cn(
+          "flex min-h-[160px] items-center justify-center rounded-[24px] border border-dashed border-slate-200 bg-white/80 p-6 text-center text-sm leading-6 text-slate-500",
+          className,
+        )}
+      >
+        当前图谱还没有任务，先新建任务或导入文档解析。
+      </div>
+    );
+  }
+
+  return (
+    <div className={cn("space-y-3", className)}>
+      {tasks.map((task) => {
+        const isSelected = task.id === selectedTaskId;
+        const isDeleting = deletingTaskId === task.id;
+        const fileCount = task.files?.length ?? 0;
+        const summaryText = task.summary
+          ? `${task.summary.nodeCount} 节点 · ${task.summary.edgeCount} 连线`
+          : fileCount > 0
+            ? `${fileCount} 个文件`
+            : "等待结果";
+        const canDelete = task.status !== "applied";
+
+        return (
+          <div key={task.id} className="relative">
+            <button
+              type="button"
+              className={cn(
+                "h-[104px] w-full rounded-[20px] border px-3 py-3 pr-14 text-left transition",
+                isSelected
+                  ? "border-sky-300 bg-sky-50/70 shadow-[0_14px_30px_-26px_rgba(2,132,199,0.32)]"
+                  : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70",
+              )}
+              onClick={() => onSelectTask(task.id)}
+            >
+              <div className="flex h-full items-start gap-3">
+                <div
+                  className={cn(
+                    "flex size-10 shrink-0 items-center justify-center rounded-2xl",
+                    isSelected ? "bg-white text-sky-700" : "bg-slate-100 text-slate-600",
+                  )}
+                >
+                  <FileText className="size-4" />
+                </div>
+
+                <div className="flex min-w-0 flex-1 flex-col justify-between">
+                  <div>
+                    <div className="truncate text-sm font-semibold text-slate-900">{task.title}</div>
+
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                      <span>{getTaskSourceTypeLabel(task.sourceType)}</span>
+                      <span>{summaryText}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 text-[11px] text-slate-500">
+                    <span className="truncate rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-600">
+                      {task.id}
+                    </span>
+                    <span className="shrink-0">{formatWorkspaceTime(task.updatedAt)}</span>
+                  </div>
+                </div>
+              </div>
+            </button>
+
+            {onDeleteTask ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "absolute right-3 top-3 size-8 rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600",
+                  !canDelete ? "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-slate-400" : undefined,
+                )}
+                title={canDelete ? `删除任务 ${task.title}` : "已入图任务暂不支持删除"}
+                disabled={!canDelete || isDeleting}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDeleteTask(task);
+                }}
+              >
+                <Trash2 className={cn("size-4", isDeleting ? "animate-pulse" : undefined)} />
+              </Button>
+            ) : null}
           </div>
         );
       })}

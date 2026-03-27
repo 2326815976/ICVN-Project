@@ -1,32 +1,28 @@
 import type {
-  ApplyTaskRequest,
+  AiParseRequest,
   CreateEdgeRequest,
   CreateNodeRequest,
   CreateTaskRequest,
-  CreateVersionRequest,
   EdgeDetailResponse,
   GraphEdge,
   GraphNode,
-  GraphVersion,
   GraphView,
   NodeDetailResponse,
   NodeHistoryResponse,
   NodeSearchResponse,
   NodeSourcesResponse,
-  PathQueryResponse,
   RelationsResponse,
-  RollbackVersionRequest,
   SubgraphQueryRequest,
   SubgraphResponse,
   Task,
   TaskApplyResponse,
+  TaskDeleteResponse,
   TaskEventListResponse,
   TaskListResponse,
+  TaskParseResponse,
   TaskResultResponse,
   UpdateEdgeRequest,
   UpdateNodeRequest,
-  VersionDetailResponse,
-  VersionListResponse,
 } from "@/lib/domain/models";
 
 type ApiEnvelope<T> = {
@@ -85,7 +81,6 @@ export const openApiClient = {
     apiRequest<Task>("/tasks", { method: "POST", body: JSON.stringify(body) }),
 
   listTasks: (query: {
-    graphId: string;
     status?: string;
     sourceType?: string;
     page?: number;
@@ -94,12 +89,16 @@ export const openApiClient = {
 
   getTaskDetail: (taskId: string) => apiRequest<Task>(`/tasks/${encodeURIComponent(taskId)}`),
 
+  deleteTask: (taskId: string) =>
+    apiRequest<TaskDeleteResponse>(`/tasks/${encodeURIComponent(taskId)}`, {
+      method: "DELETE",
+    }),
+
   getTaskResult: (taskId: string) => apiRequest<TaskResultResponse>(`/tasks/${encodeURIComponent(taskId)}/result`),
 
-  applyTaskResult: (taskId: string, body?: ApplyTaskRequest) =>
+  applyTaskResult: (taskId: string) =>
     apiRequest<TaskApplyResponse>(`/tasks/${encodeURIComponent(taskId)}/apply`, {
       method: "POST",
-      body: JSON.stringify(body ?? {}),
     }),
 
   listTaskEvents: (taskId: string) => apiRequest<TaskEventListResponse>(`/tasks/${encodeURIComponent(taskId)}/events`),
@@ -155,36 +154,12 @@ export const openApiClient = {
     pageSize?: number;
   }) => apiRequest<NodeSearchResponse>(`/query/search${toQueryString(query)}`),
 
-  queryPath: (query: {
-    graphId: string;
-    sourceId: string;
-    targetId: string;
-    maxDepth?: number;
-    strategy?: "shortest" | "all";
-  }) => apiRequest<PathQueryResponse>(`/query/path${toQueryString(query)}`),
-
   querySubgraph: (body: SubgraphQueryRequest) =>
     apiRequest<SubgraphResponse>("/query/subgraph", { method: "POST", body: JSON.stringify(body) }),
 
-  createVersion: (body: CreateVersionRequest) =>
-    apiRequest<GraphVersion>("/versions", { method: "POST", body: JSON.stringify(body) }),
-
-  listVersions: (query: { graphId: string; page?: number; pageSize?: number }) =>
-    apiRequest<VersionListResponse>(`/versions${toQueryString(query)}`),
-
-  getVersionDetail: (versionId: string) => apiRequest<VersionDetailResponse>(`/versions/${encodeURIComponent(versionId)}`),
-
-  rollbackVersion: (versionId: string, body: RollbackVersionRequest) =>
-    apiRequest<{ rolledBackFrom: string; newVersion: GraphVersion }>(`/versions/${encodeURIComponent(versionId)}/rollback`, {
+  parseTaskContent: (taskId: string, body: AiParseRequest) =>
+    apiRequest<TaskParseResponse>(`/tasks/${encodeURIComponent(taskId)}/parse`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
-
-  createAiParseJob: (body: Record<string, unknown>) =>
-    apiRequest<Record<string, unknown>>("/ai/parse", { method: "POST", body: JSON.stringify(body) }),
-
-  getAiJob: (jobId: string) => apiRequest<Record<string, unknown>>(`/ai/jobs/${encodeURIComponent(jobId)}`),
-
-  attachAiJobResultToTask: (jobId: string) =>
-    apiRequest<Record<string, unknown>>(`/ai/jobs/${encodeURIComponent(jobId)}/apply`, { method: "POST" }),
 };

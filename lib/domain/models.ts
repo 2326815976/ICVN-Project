@@ -9,10 +9,9 @@ export type JsonValue =
     };
 
 export type GraphNodeType = string;
-export type TaskStatus = "uploaded" | "queued" | "processing" | "validated" | "applied" | "failed" | "canceled";
+export type TaskStatus = "uploaded" | "queued" | "processing" | "validated" | "applied" | "failed";
 export type TaskSourceType = "document" | "text" | "news" | "social" | "story" | "custom";
 export type SourceType = "manual" | "task" | "import" | "ai";
-export type VersionTrigger = "manual" | "auto" | "rollback" | "ai-import";
 
 export interface Position {
   x: number;
@@ -136,62 +135,16 @@ export interface NodeSearchResponse {
   total: number;
 }
 
-export interface PathItem {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-  length: number;
-}
-
-export interface PathQueryResponse {
-  paths: PathItem[];
-}
-
-export interface VersionSummary {
-  versionId: string;
-  versionNo: number;
-  name: string;
-}
-
 export interface GraphView {
   graphId: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
-  version?: VersionSummary;
 }
 
 export interface SubgraphResponse {
   graphId: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
-}
-
-export interface GraphVersion {
-  id: string;
-  graphId: string;
-  versionNo: number;
-  name: string;
-  description?: string | null;
-  trigger: VersionTrigger;
-  snapshotId: string;
-  createdBy: string;
-  createdAt: string;
-}
-
-export interface VersionListResponse {
-  items: GraphVersion[];
-  page: number;
-  pageSize: number;
-  total: number;
-}
-
-export interface VersionDetailResponse {
-  version: GraphVersion;
-  snapshotSummary?: {
-    nodeCount: number;
-    edgeCount: number;
-    capturedAt: string;
-  };
-  diff?: Record<string, JsonValue> | null;
 }
 
 export interface TaskFile {
@@ -207,25 +160,17 @@ export interface TaskFileInput {
   mimeType: string;
   size?: number;
   storageKey?: string;
+  contentBase64?: string;
 }
 
 export interface CreateTaskRequest {
-  graphId: string;
   sourceType: TaskSourceType;
   title: string;
   content?: string;
   files?: TaskFileInput[];
   options?: {
     language?: string;
-    autoMergeEntities?: boolean;
-    createSnapshot?: boolean;
   };
-}
-
-export interface TaskVersionLink {
-  versionId: string;
-  versionNo: number;
-  name: string;
 }
 
 export interface TaskSummary {
@@ -236,14 +181,11 @@ export interface TaskSummary {
 
 export interface Task {
   id: string;
-  graphId: string;
   sourceType: TaskSourceType;
   title: string;
   status: TaskStatus;
   files?: TaskFile[];
-  contentPreview?: string;
   summary?: TaskSummary;
-  currentVersion?: TaskVersionLink | null;
   errorMessage?: string | null;
   createdBy: string;
   createdAt: string;
@@ -286,35 +228,66 @@ export interface AiParseResult {
   events: GraphNode[];
 }
 
-export type AiJobStatus = "pending" | "processing" | "validated" | "applied" | "failed";
-
-export interface AiParseRequest {
-  graphId: string;
-  sourceType: "news" | "social" | "story" | "custom";
-  content: string;
-  options?: {
-    language?: string;
-    autoMergeEntities?: boolean;
-    createSnapshot?: boolean;
-  };
+export interface AiRawParseMeta {
+  provider: string;
+  model: string;
 }
 
-export interface AiJob {
+export interface AiInterrogatedPerson {
   id: string;
-  graphId: string;
-  taskId?: string | null;
-  status: AiJobStatus;
-  inputText: string;
-  result?: AiParseResult;
+  name?: string;
+  sex?: string;
+  birthday?: string;
+  IDnumber?: string;
+  regPlace?: string;
+  nowPlace?: string;
+  occupation?: string;
+  family?: string;
+  criminal?: string;
+  remark?: string;
+}
+
+export interface AiEventPerson {
+  name: string;
+}
+
+export interface AiRawEvent {
+  eventID: string;
+  name1?: string;
+  name2?: string;
+  eventDescription?: string;
+  eventOverview?: string;
+}
+
+export interface AiRawParseResult {
+  meta: AiRawParseMeta;
+  interrogatedPerson: AiInterrogatedPerson[];
+  eventPerson: AiEventPerson[];
+  events: AiRawEvent[];
+}
+
+export interface AiRawParseResponse {
+  taskId: string;
+  type: string;
+  result: AiRawParseResult;
   errorMessage?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface AiJobAcceptedResponse {
-  jobId: string;
-  taskId?: string | null;
-  status: AiJobStatus;
+export interface AiParseRequest {
+  taskId?: string;
+  content: string[];
+}
+
+export interface TaskParseResponse {
+  taskId: string;
+  status: TaskStatus;
+}
+
+export interface TaskDeleteResponse {
+  id: string;
+  deleted: boolean;
 }
 
 export interface TaskResultResponse {
@@ -326,7 +299,6 @@ export interface TaskResultResponse {
 export interface TaskApplyResponse {
   taskId: string;
   status: TaskStatus;
-  version?: GraphVersion;
 }
 
 export interface CreateNodeRequest {
@@ -374,24 +346,6 @@ export interface UpdateEdgeRequest {
   end?: string | null;
   weight?: number | null;
   properties?: Record<string, JsonValue>;
-}
-
-export interface CreateVersionRequest {
-  graphId: string;
-  name: string;
-  description?: string;
-  trigger: VersionTrigger;
-}
-
-export interface ApplyTaskRequest {
-  graphId?: string;
-  createSnapshot?: boolean;
-  versionName?: string;
-}
-
-export interface RollbackVersionRequest {
-  graphId: string;
-  reason?: string;
 }
 
 export interface RelationsResponse {

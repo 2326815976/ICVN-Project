@@ -99,8 +99,8 @@ function estimateNodeLabelSize(text: string) {
   const lineCount = Math.max(lines.length, 1);
 
   return {
-    width: clamp(Math.ceil(longestLineUnits * 14 + 24), 56, 300),
-    height: clamp(lineCount * 24 + 8, 32, 160),
+    width: clamp(Math.ceil(longestLineUnits * 14 + 40), 56, 460),
+    height: clamp(lineCount * 24 + 16, 32, 300),
   };
 }
 
@@ -123,8 +123,8 @@ function getLayoutNodeMinimumSize(node: ShapeGraphNode) {
   }
 
   if (node.data.kind === "diamond") {
-    const contentSpan = Math.max(labelSize.width + 40, labelSize.height + 40 + imageHeight);
-    const uniformSize = Math.max(baseSize.width, Math.ceil(contentSpan * 1.08));
+    const contentSpan = Math.max(labelSize.width + 96, labelSize.height + 96 + imageHeight);
+    const uniformSize = Math.max(baseSize.width, Math.ceil(contentSpan * 1.12));
     minWidth = uniformSize;
     minHeight = uniformSize;
   }

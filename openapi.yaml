@@ -8,15 +8,13 @@ info:
     范围包含：
     - Graph Module
     - Query Module
-    - Version Module
-    - AI 边界接口
-
-    不包含 AI 内部编排实现细节，仅定义后端对 AI 结果的接入边界。
+    - Task Module
+    - AI Boundary Module
 
     补充说明：
     - 一个任务可关联多个上传文档
     - 任务结果必须先经后端校验和标准化，再允许入图
-    - Neo4j 保存最终图结构，PostgreSQL 保存任务、版本、来源、证据和历史记录
+    - MySQL 保存最终图结构、任务、来源、证据和历史记录
     - 节点类型与关系类型均采用可扩展字符串，不在接口层写死
 
 servers:
@@ -27,13 +25,11 @@ tags:
   - name: Graph
     description: 节点、关系、图谱视图
   - name: Query
-    description: 关系查询、路径查询、子图查询
-  - name: Version
-    description: 版本快照与回滚
+    description: 关系查询、搜索、子图查询
   - name: Task
     description: 文档任务中心
   - name: AI
-    description: 内部 AI 边界接口，不作为前端主流程入口
+    description: 无状态 AI 解析边界接口，不提供历史结果查询
 
 paths:
   /tasks:
@@ -69,12 +65,11 @@ paths:
       tags: [Task]
       summary: 获取任务列表
       description: |
-        查询指定图谱下的任务列表。
+        查询当前默认工作空间下的任务列表。
         用于前端任务中心、任务历史列表、筛选页和批量查看处理状态的场景。
         该接口只返回任务级摘要信息，不返回完整结构化结果；若要查看具体解析结果，应继续调用 `/tasks/{taskId}/result`。
       operationId: listTasks
       parameters:
-        - $ref: '#/components/parameters/GraphIdQuery'
         - name: status
           in: query
           required: false
@@ -121,7 +116,7 @@ paths:
       summary: 获取任务详情
       description: |
         查询单个任务的完整元信息。
-        返回任务标题、来源类型、文件信息、状态、统计摘要、当前关联版本、错误信息等内容。
+        返回任务标题、来源类型、文件信息、状态、统计摘要、错误信息等内容。
         用于任务详情页、任务状态面板和前端轮询状态更新。
       operationId: getTaskDetail
       parameters:
@@ -141,15 +136,110 @@ paths:
                         $ref: '#/components/schemas/Task'
         '404':
           $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Task]
+      summary: 删除任务
+      description: |
+        删除尚未入图的任务。
+        该操作会移除任务主记录、任务文件、解析结果和事件流。
+        已经入图的任务为保证追溯一致性，不允许直接删除。
+      operationId: deleteTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 删除结果。
+                        $ref: '#/components/schemas/TaskDeleteResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /tasks/{taskId}/parse:
+    post:
+      tags: [Task]
+      summary: 提交任务解析文本
+      description: |
+        以任务为主键提交待解析文本。
+        调用方应先完成文件文本提取，再将每个文件对应的文本按数组传入 `content`。
+        后端会透传 `taskId` 调用内部无状态 `/ai/parse` 接口，并将 AI 原始返回结果保存到该任务下。
+        前端后续继续通过 `/tasks/{taskId}/result` 获取转换后的图谱结果。
+      operationId: parseTaskContent
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AiParseRequest'
+      responses:
+        '202':
+          description: 已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: 已受理的任务解析状态。
+                        $ref: '#/components/schemas/TaskParseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /ai/parse:
+    post:
+      tags: [AI]
+      summary: AI 解析文本内容
+      description: |
+        内部无状态 AI 边界接口。
+        调用方应先完成文档文本提取，再将每个文件对应的文本按数组形式传入 `content`。
+        若调用方已有任务上下文，可同时传入 `taskId`，用于链路追踪和结果绑定。
+        该接口直接返回 AI 原始业务结果，不提供历史结果查询能力。
+      operationId: aiParseContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AiParseRequest'
+      responses:
+        '200':
+          description: AI 解析成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        description: AI 原始解析结果。
+                        $ref: '#/components/schemas/AiRawParseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
   /tasks/{taskId}/result:
     get:
       tags: [Task]
       summary: 获取任务结构化结果
       description: |
-        查询任务经 AI 解析并经过后端校验、标准化后的结构化结果。
-        返回节点、关系、事件等标准 JSON 数据，用于前端预览“即将入图”的内容。
-        该接口通常在任务进入 `validated` 或 `applied` 状态后调用。
+        查询任务经 AI 原始结果转换后的结构化图谱结果。
+        返回节点、关系、事件等标准 JSON 数据，用于前端渲染图谱。
+        该接口返回的是面向图谱系统的转换结果，不等同于 AI 原始业务返回。
       operationId: getTaskResult
       parameters:
         - $ref: '#/components/parameters/TaskId'
@@ -176,17 +266,11 @@ paths:
       tags: [Task]
       summary: 应用任务结果入图
       description: |
-        将已经完成校验的任务结果正式写入图数据库，并按需生成图谱版本快照。
-        前端正式入图应统一走该接口。
+        将任务结构化结果正式写入图谱。
+        若任务结果已入图，调用会返回幂等成功。
       operationId: applyTaskResult
       parameters:
         - $ref: '#/components/parameters/TaskId'
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApplyTaskRequest'
       responses:
         '200':
           description: 应用成功
@@ -198,7 +282,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        description: 应用任务结果后的状态与版本信息。
+                        description: 应用任务结果后的任务状态。
                         $ref: '#/components/schemas/TaskApplyResponse'
         '404':
           $ref: '#/components/responses/NotFound'
@@ -443,7 +527,7 @@ paths:
       summary: 获取图谱视图
       description: |
         获取当前图谱的整图视图。
-        返回前端渲染所需的节点、关系和版本摘要，用于首页图谱展示、刷新图谱和查看当前最新状态。
+        返回前端渲染所需的节点和关系，用于首页图谱展示、刷新图谱和查看当前最新状态。
         该接口面向“最终已入图”的数据，而不是任务预览数据。
       operationId: getGraphView
       parameters:
@@ -724,62 +808,6 @@ paths:
                         description: 节点搜索结果。
                         $ref: '#/components/schemas/NodeSearchResponse'
 
-  /query/path:
-    get:
-      tags: [Query]
-      summary: 查询路径
-      description: |
-        查询两个节点之间的关系路径。
-        支持最短路径或多路径策略，可用于发现人物之间、组织之间或事件之间的连接链路。
-        该接口返回的是图路径结构，不负责返回来源证据和历史记录。
-      operationId: queryPath
-      parameters:
-        - $ref: '#/components/parameters/GraphIdQuery'
-        - name: sourceId
-          in: query
-          required: true
-          description: 起点节点 ID。
-          schema:
-            type: string
-        - name: targetId
-          in: query
-          required: true
-          description: 终点节点 ID。
-          schema:
-            type: string
-        - name: maxDepth
-          in: query
-          required: false
-          description: 最大搜索深度。
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 10
-            default: 4
-        - name: strategy
-          in: query
-          required: false
-          description: 路径搜索策略，shortest 表示最短路径，all 表示多路径。
-          schema:
-            type: string
-            enum: [shortest, all]
-            default: shortest
-      responses:
-        '200':
-          description: 查询成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        description: 节点路径查询结果。
-                        $ref: '#/components/schemas/PathQueryResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-
   /query/subgraph:
     post:
       tags: [Query]
@@ -810,260 +838,6 @@ paths:
                         $ref: '#/components/schemas/SubgraphResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-
-  /versions:
-    post:
-      tags: [Version]
-      summary: 保存版本
-      description: |
-        将当前图谱状态保存为一个版本快照。
-        该接口用于手动创建版本，通常在用户希望显式记录一次阶段性成果时调用。
-        保存版本后，后端应写入版本记录和快照数据，供后续查看、比对和回滚。
-      operationId: createVersion
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateVersionRequest'
-      responses:
-        '201':
-          description: 创建成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        description: 新创建的版本对象。
-                        $ref: '#/components/schemas/GraphVersion'
-    get:
-      tags: [Version]
-      summary: 获取版本列表
-      description: |
-        查询指定图谱的版本历史列表。
-        返回版本分页结果，用于前端版本中心展示、选择历史版本、执行回滚前的版本筛选。
-      operationId: listVersions
-      parameters:
-        - $ref: '#/components/parameters/GraphIdQuery'
-        - name: page
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            default: 1
-        - name: pageSize
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 20
-      responses:
-        '200':
-          description: 查询成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        description: 版本列表分页结果。
-                        $ref: '#/components/schemas/VersionListResponse'
-
-  /versions/{versionId}:
-    get:
-      tags: [Version]
-      summary: 获取版本详情
-      description: |
-        查询单个版本的详细信息。
-        返回版本元信息、快照统计摘要以及可选差异信息，用于版本详情页和历史版本对比场景。
-      operationId: getVersionDetail
-      parameters:
-        - name: versionId
-          in: path
-          required: true
-          description: 版本 ID。
-          schema:
-            type: string
-      responses:
-        '200':
-          description: 查询成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        description: 版本详情。
-                        $ref: '#/components/schemas/VersionDetailResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /versions/{versionId}/rollback:
-    post:
-      tags: [Version]
-      summary: 回滚版本
-      description: |
-        将图谱状态回滚到指定历史版本。
-        后端应基于该版本的快照重建当前图谱状态，并生成一条新的 rollback 类型版本记录。
-        该接口用于修正错误数据、恢复历史状态，但不等价于“仅查看历史图”。
-      operationId: rollbackVersion
-      parameters:
-        - name: versionId
-          in: path
-          required: true
-          description: 版本 ID。
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RollbackVersionRequest'
-      responses:
-        '200':
-          description: 回滚成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        description: 版本回滚结果。
-                        properties:
-                          rolledBackFrom:
-                            type: string
-                            description: 被回滚的原始版本 ID。
-                            example: ver_12
-                          newVersion:
-                            description: 回滚后自动生成的新版本对象。
-                            $ref: '#/components/schemas/GraphVersion'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  /ai/parse:
-    post:
-      tags: [AI]
-      summary: 提交 AI 解析任务
-      description: |
-        内部 AI 边界接口，不作为前端主流程入口。
-        通常由任务模块或内部编排层调用，用于将文本内容送入 AI 解析。
-      operationId: createAiParseJob
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AiParseRequest'
-      responses:
-        '202':
-          description: 已受理
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        description: 已受理的 AI 作业信息。
-                        $ref: '#/components/schemas/AiJobAcceptedResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-
-  /ai/jobs/{jobId}:
-    get:
-      tags: [AI]
-      summary: 查询 AI 任务状态
-      description: |
-        查询内部 AI 作业状态。
-        该接口主要供任务模块或内部编排层同步 AI 处理进度，不建议作为前端主流程直接调用。
-      operationId: getAiJob
-      parameters:
-        - name: jobId
-          in: path
-          required: true
-          description: AI 作业 ID。
-          schema:
-            type: string
-      responses:
-        '200':
-          description: 查询成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        description: AI 作业详情。
-                        $ref: '#/components/schemas/AiJob'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /ai/jobs/{jobId}/apply:
-    post:
-      tags: [AI]
-      summary: 关联 AI 结果到任务上下文
-      description: |
-        内部 AI 边界接口。
-        将已校验的 AI 作业结果转入任务上下文或任务结果存储，不直接写入图数据库。
-        正式入图必须走 /tasks/{taskId}/apply。
-      operationId: attachAiJobResultToTask
-      parameters:
-        - name: jobId
-          in: path
-          required: true
-          description: AI 作业 ID。
-          schema:
-            type: string
-      responses:
-        '200':
-          description: 应用成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        description: AI 作业结果已关联到任务上下文后的结果。
-                        properties:
-                          jobId:
-                            type: string
-                            description: AI 作业 ID。
-                            example: job_1
-                          status:
-                            type: string
-                            description: 当前内部处理状态。
-                            example: validated
-                          taskId:
-                            type: string
-                            nullable: true
-                            description: 关联的任务 ID。
-                            example: task_1
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
 
 components:
   parameters:
@@ -1207,9 +981,8 @@ components:
 
     TaskStatus:
       type: string
-      description: 任务状态机。典型流转为 uploaded -> queued -> processing -> validated -> applied。
-      enum:
-        [uploaded, queued, processing, validated, applied, failed, canceled]
+      description: 任务状态机。典型流转为 uploaded -> processing -> applied，异常时为 failed。
+      enum: [uploaded, processing, applied, failed]
 
     TaskSourceType:
       type: string
@@ -1679,103 +1452,6 @@ components:
           description: 更新后的关系扩展属性。
           additionalProperties: true
 
-    GraphVersion:
-      type: object
-      description: 图谱版本元信息。
-      properties:
-        id:
-          type: string
-          description: 版本唯一标识。
-          example: ver_1
-        graphId:
-          type: string
-          description: 所属图谱 ID。
-          example: default
-        versionNo:
-          type: integer
-          description: 版本号。
-          example: 1
-        name:
-          type: string
-          description: 版本名称。
-          example: v1-initial-import
-        description:
-          type: string
-          nullable: true
-          description: 版本说明。
-        trigger:
-          type: string
-          enum: [manual, auto, rollback, ai-import]
-          description: 版本产生方式。
-        snapshotId:
-          type: string
-          description: 关联快照 ID。
-          example: snap_1
-        createdBy:
-          type: string
-          description: 创建版本的用户 ID。
-          example: user_1
-        createdAt:
-          type: string
-          format: date-time
-          description: 创建时间。
-      required:
-        [id, graphId, versionNo, name, trigger, snapshotId, createdBy, createdAt]
-
-    CreateVersionRequest:
-      type: object
-      description: 手动创建版本请求体。
-      properties:
-        graphId:
-          type: string
-          description: 目标图谱 ID。
-          example: default
-        name:
-          type: string
-          description: 版本名称。
-          example: v1-initial-import
-        description:
-          type: string
-          description: 版本说明。
-          example: 首次导入新闻人物关系
-        trigger:
-          type: string
-          enum: [manual, auto, rollback, ai-import]
-          description: 触发方式。
-          example: manual
-      required: [graphId, name, trigger]
-
-    RollbackVersionRequest:
-      type: object
-      description: 回滚版本请求体。
-      properties:
-        graphId:
-          type: string
-          description: 目标图谱 ID。
-          example: default
-        reason:
-          type: string
-          description: 回滚原因说明。
-          example: 数据修正
-      required: [graphId]
-
-    VersionSummary:
-      type: object
-      description: 图谱视图中携带的版本摘要。
-      properties:
-        versionId:
-          type: string
-          description: 版本 ID。
-          example: ver_latest
-        versionNo:
-          type: integer
-          description: 版本号。
-          example: 12
-        name:
-          type: string
-          description: 版本名称。
-          example: latest
-
     GraphView:
       type: object
       description: 前端整图渲染所需的图谱视图。
@@ -1796,9 +1472,6 @@ components:
           description: 当前图谱中的关系集合。
           items:
             $ref: '#/components/schemas/GraphEdge'
-        version:
-          description: 当前图谱对应的版本摘要。
-          $ref: '#/components/schemas/VersionSummary'
       required: [graphId, nodes, edges]
 
     SubgraphQueryRequest:
@@ -2027,125 +1700,22 @@ components:
           example: 3
       required: [items, page, pageSize, total]
 
-    PathItem:
-      type: object
-      description: 一条路径查询结果。
-      properties:
-        nodes:
-          type: array
-          description: 该路径经过的节点序列。
-          items:
-            oneOf:
-              - $ref: '#/components/schemas/GraphNode'
-              - $ref: '#/components/schemas/EventNode'
-        edges:
-          type: array
-          description: 该路径经过的关系序列。
-          items:
-            $ref: '#/components/schemas/GraphEdge'
-        length:
-          type: integer
-          description: 路径长度，通常表示关系条数。
-          example: 3
-      required: [nodes, edges, length]
-
-    PathQueryResponse:
-      type: object
-      description: 路径查询结果集合。
-      properties:
-        paths:
-          type: array
-          description: 路径结果列表。
-          items:
-            $ref: '#/components/schemas/PathItem'
-      required: [paths]
-
-    VersionListResponse:
-      type: object
-      description: 版本列表分页响应。
-      properties:
-        items:
-          type: array
-          description: 版本列表。
-          items:
-            $ref: '#/components/schemas/GraphVersion'
-        page:
-          type: integer
-          description: 当前页码。
-          example: 1
-        pageSize:
-          type: integer
-          description: 每页条数。
-          example: 20
-        total:
-          type: integer
-          description: 总记录数。
-          example: 1
-      required: [items, page, pageSize, total]
-
-    VersionDetailResponse:
-      type: object
-      description: 版本详情响应。
-      properties:
-        version:
-          description: 版本元信息。
-          $ref: '#/components/schemas/GraphVersion'
-        snapshotSummary:
-          type: object
-          description: 该版本快照的统计摘要。
-          properties:
-            nodeCount:
-              type: integer
-              description: 快照中节点数量。
-              example: 24
-            edgeCount:
-              type: integer
-              description: 快照中关系数量。
-              example: 31
-            capturedAt:
-              type: string
-              format: date-time
-              description: 快照采集时间。
-        diff:
-          type: object
-          nullable: true
-          description: 与相邻版本的差异摘要。
-          additionalProperties: true
-      required: [version]
-
     AiParseRequest:
       type: object
       description: AI 解析边界接口请求体。
       properties:
-        graphId:
+        taskId:
           type: string
-          description: 目标图谱 ID。
-          example: default
-        sourceType:
-          type: string
-          enum: [news, social, story, custom]
-          description: 解析内容来源类型。
-          example: news
+          description: 可选任务 ID。用于任务模块内部调用 `/ai/parse` 时透传链路标识；无状态单次调用可不传。
+          example: task_1
         content:
-          type: string
-          description: 需要 AI 解析的原始文本。
-          example: 2024年，A 与 B 宣布合作，在上海共同参与 AI 峰会。
-        options:
-          type: object
-          properties:
-            language:
-              type: string
-              description: 输入文本语言。
-              example: zh-CN
-            autoMergeEntities:
-              type: boolean
-              description: 是否在解析后自动合并重复实体。
-              example: true
-            createSnapshot:
-              type: boolean
-              description: 是否在结果应用时建议生成版本快照。
-              example: true
-      required: [graphId, sourceType, content]
+          type: array
+          description: 需要 AI 解析的原始文本数组，每个文件对应一个字符串内容。
+          minItems: 1
+          items:
+            type: string
+          example: ["第一份文件内容", "第二份文件内容"]
+      required: [content]
 
     TaskFile:
       type: object
@@ -2193,6 +1763,9 @@ components:
           type: string
           description: 文件临时上传后的存储路径标识。
           example: uploads/2026/03/interview.docx
+        contentBase64:
+          type: string
+          description: 可选的 base64 文件内容，适用于未先上传到对象存储的文档直传场景。
       required: [fileName, mimeType]
 
     CreateTaskRequest:
@@ -2202,10 +1775,6 @@ components:
         - required: [content]
         - required: [files]
       properties:
-        graphId:
-          type: string
-          description: 任务所属图谱 ID。
-          example: default
         sourceType:
           description: 任务输入来源类型。
           $ref: '#/components/schemas/TaskSourceType'
@@ -2230,32 +1799,7 @@ components:
               type: string
               description: 输入内容语言。
               example: zh-CN
-            autoMergeEntities:
-              type: boolean
-              description: 是否自动合并重复实体。
-              example: true
-            createSnapshot:
-              type: boolean
-              description: 应用结果时是否建议生成版本快照。
-              example: true
-      required: [graphId, sourceType, title]
-
-    TaskVersionLink:
-      type: object
-      description: 任务关联的版本信息摘要。
-      properties:
-        versionId:
-          type: string
-          description: 版本 ID。
-          example: ver_21
-        versionNo:
-          type: integer
-          description: 版本号。
-          example: 21
-        name:
-          type: string
-          description: 版本名称。
-          example: ai-import-20260319
+      required: [sourceType, title]
 
     TaskSummary:
       type: object
@@ -2282,10 +1826,6 @@ components:
           type: string
           description: 任务唯一标识。
           example: task_1
-        graphId:
-          type: string
-          description: 所属图谱 ID。
-          example: default
         sourceType:
           description: 任务输入来源类型。
           $ref: '#/components/schemas/TaskSourceType'
@@ -2301,16 +1841,9 @@ components:
           description: 已保存的文件元信息列表。
           items:
             $ref: '#/components/schemas/TaskFile'
-        contentPreview:
-          type: string
-          description: 原始内容或文档内容的截断预览。
-          example: 这是一段文档前 200 字摘要...
         summary:
           description: 任务结果统计摘要。
           $ref: '#/components/schemas/TaskSummary'
-        currentVersion:
-          description: 若结果已入图，对应的当前版本摘要。
-          $ref: '#/components/schemas/TaskVersionLink'
         errorMessage:
           type: string
           nullable: true
@@ -2328,7 +1861,7 @@ components:
           format: date-time
           description: 最近更新时间。
       required:
-        [id, graphId, sourceType, title, status, createdAt, updatedAt]
+        [id, sourceType, title, status, createdAt, updatedAt]
 
     TaskListResponse:
       type: object
@@ -2355,7 +1888,7 @@ components:
 
     TaskResultResponse:
       type: object
-      description: 任务结构化结果响应。
+      description: 任务结构化图谱结果响应。
       properties:
         taskId:
           type: string
@@ -2365,26 +1898,36 @@ components:
           description: 返回结果时任务所处状态。
           $ref: '#/components/schemas/TaskStatus'
         result:
-          description: 标准化后的结构化结果。
+          description: 转换后的标准图谱结果。
           $ref: '#/components/schemas/AiParseResult'
       required: [taskId, status]
 
-    ApplyTaskRequest:
+    TaskParseResponse:
       type: object
-      description: 应用任务结果入图时的请求体。
+      description: 任务解析提交后的响应。
       properties:
-        graphId:
+        taskId:
           type: string
-          description: 目标图谱 ID。
-          example: default
-        createSnapshot:
+          description: 任务 ID。
+          example: task_1
+        status:
+          description: 当前任务状态。
+          $ref: '#/components/schemas/TaskStatus'
+      required: [taskId, status]
+
+    TaskDeleteResponse:
+      type: object
+      description: 删除任务后的响应。
+      properties:
+        id:
+          type: string
+          description: 已删除的任务 ID。
+          example: task_1
+        deleted:
           type: boolean
-          description: 是否在本次应用后创建图谱版本快照。
+          description: 是否删除成功。
           example: true
-        versionName:
-          type: string
-          description: 若创建快照，则使用的版本名称。
-          example: ai-import-20260319
+      required: [id, deleted]
 
     TaskApplyResponse:
       type: object
@@ -2397,9 +1940,6 @@ components:
         status:
           description: 任务应用后的状态。
           $ref: '#/components/schemas/TaskStatus'
-        version:
-          description: 本次应用产生的版本信息。
-          $ref: '#/components/schemas/GraphVersion'
       required: [taskId, status]
 
     TaskEvent:
@@ -2460,17 +2000,11 @@ components:
         summary:
           type: string
           description: AI 生成的结果摘要。
-        provider:
-          type: string
-          description: AI 服务提供方标识。
-        model:
-          type: string
-          description: 使用的模型标识。
       required: [sourceType]
 
     AiParseResult:
       type: object
-      description: AI 输出的标准结构化结果。
+      description: 面向图谱系统渲染的标准结构化结果。
       properties:
         meta:
           description: 解析结果元信息。
@@ -2492,38 +2026,131 @@ components:
             $ref: '#/components/schemas/EventNode'
       required: [meta, nodes, edges, events]
 
-    AiJob:
+    AiRawParseMeta:
       type: object
-      description: AI 边界接口中的作业对象。
+      description: AI 原始返回中的模型元信息。
+      properties:
+        provider:
+          type: string
+          description: 模型提供方。
+          example: default
+        model:
+          type: string
+          description: 模型名称。
+          example: deepseek
+      required: [provider, model]
+
+    AiInterrogatedPerson:
+      type: object
+      description: 审讯对象信息。
       properties:
         id:
           type: string
-          description: AI 作业唯一标识。
-          example: job_1
-        graphId:
+          description: 人员唯一标识。
+          example: person_1
+        name:
           type: string
-          description: 目标图谱 ID。
-          example: default
+          description: 姓名。
+        sex:
+          type: string
+          description: 性别。
+        birthday:
+          type: string
+          description: 出生日期。
+        IDnumber:
+          type: string
+          description: 身份证号。
+        regPlace:
+          type: string
+          description: 户籍地。
+        nowPlace:
+          type: string
+          description: 现住地。
+        occupation:
+          type: string
+          description: 职业。
+        family:
+          type: string
+          description: 家庭情况。
+        criminal:
+          type: string
+          description: 前科情况。
+        remark:
+          type: string
+          description: 备注。
+      required: [id]
+
+    AiEventPerson:
+      type: object
+      description: 事件关联人员。
+      properties:
+        name:
+          type: string
+          description: 人员姓名。
+      required: [name]
+
+    AiRawEvent:
+      type: object
+      description: AI 原始事件项。
+      properties:
+        eventID:
+          type: string
+          description: 事件 ID。
+        name1:
+          type: string
+          description: 第一关联人姓名。
+        name2:
+          type: string
+          description: 第二关联人姓名。
+        eventDescription:
+          type: string
+          description: 事件描述。
+        eventOverview:
+          type: string
+          description: 事件概述。
+      required: [eventID]
+
+    AiRawParseResult:
+      type: object
+      description: AI 原始业务结果体。
+      properties:
+        meta:
+          $ref: '#/components/schemas/AiRawParseMeta'
+        interrogatedPerson:
+          type: array
+          description: 审讯对象列表。
+          items:
+            $ref: '#/components/schemas/AiInterrogatedPerson'
+        eventPerson:
+          type: array
+          description: 事件涉及人员列表。
+          items:
+            $ref: '#/components/schemas/AiEventPerson'
+        events:
+          type: array
+          description: 事件列表。
+          items:
+            $ref: '#/components/schemas/AiRawEvent'
+      required: [meta, interrogatedPerson, eventPerson, events]
+
+    AiRawParseResponse:
+      type: object
+      description: AI 原始解析结果响应体。
+      properties:
         taskId:
           type: string
-          nullable: true
-          description: 若该 AI 作业由任务触发，则这里记录关联的任务 ID。
+          description: 任务 ID。该字段由任务系统提供并与 AI 原始结果绑定。
           example: task_1
-        status:
+        type:
           type: string
-          enum: [pending, processing, validated, applied, failed]
-          description: AI 作业状态。
-          example: processing
-        inputText:
-          type: string
-          description: 提交给 AI 的原始文本。
+          description: 结果类型。
+          example: merge
         result:
-          description: AI 解析后的结构化结果。
-          $ref: '#/components/schemas/AiParseResult'
+          $ref: '#/components/schemas/AiRawParseResult'
         errorMessage:
           type: string
           nullable: true
-          description: 作业失败时的错误说明。
+          description: 错误信息。
         createdAt:
           type: string
           format: date-time
@@ -2531,24 +2158,5 @@ components:
         updatedAt:
           type: string
           format: date-time
-          description: 最近更新时间。
-      required: [id, graphId, status, inputText, createdAt, updatedAt]
-
-    AiJobAcceptedResponse:
-      type: object
-      description: AI 解析任务受理后的返回结构。
-      properties:
-        jobId:
-          type: string
-          description: AI 作业 ID。
-          example: job_1
-        taskId:
-          type: string
-          nullable: true
-          description: 若该作业是从任务主流程中触发，则返回关联任务 ID。
-          example: task_1
-        status:
-          type: string
-          description: 当前受理状态。
-          example: pending
-      required: [jobId, status]
+          description: 更新时间。
+      required: [taskId, type, result, createdAt, updatedAt]
