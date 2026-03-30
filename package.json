@@ -5,6 +5,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "test:doc-extract": "node --experimental-strip-types --test tools/tests/doc-extract.test.ts",
     "test:backend:plan": "node --experimental-strip-types tools/tests/backend-test-plan-runner.mjs",
     "db:ping": "node --env-file=.env.local tools/test-db-connection.mjs",
     "db:init": "node --env-file=.env.local tools/init-db.mjs",

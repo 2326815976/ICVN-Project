@@ -56,17 +56,39 @@ export function useDocumentImportFlow({
       onProgress?: (payload: { status: DocumentImportStatus; progress: number; message: string }) => void,
     ) => {
       let latestStatus = "queued";
-      for (let index = 0; index < 6; index += 1) {
-        await sleep(900);
+      const maxAttempts = 360;
+      let resultLoaded = false;
+      let taskResult: Awaited<ReturnType<typeof openApiClient.getTaskResult>> | null = null;
+
+      for (let index = 0; index < maxAttempts; index += 1) {
+        await sleep(5000);
         const detail = await openApiClient.getTaskDetail(taskId);
         latestStatus = detail.status;
+        const elapsedMinutes = Math.floor(((index + 1) * 5) / 60);
         onProgress?.({
           status: "processing",
-          progress: Math.min(90, 55 + index * 6),
-          message: `任务状态：${latestStatus}`,
+          progress: Math.min(95, 55 + Math.floor(((index + 1) / maxAttempts) * 40)),
+          message:
+            elapsedMinutes > 0
+              ? `任务状态：${latestStatus}，已等待约 ${elapsedMinutes} 分钟`
+              : `任务状态：${latestStatus}`,
         });
-        if (latestStatus === "validated" || latestStatus === "applied" || latestStatus === "failed") {
+
+        if (latestStatus === "failed") {
           break;
+        }
+
+        if (latestStatus === "validated" || latestStatus === "applied") {
+          try {
+            taskResult = await openApiClient.getTaskResult(taskId);
+            resultLoaded = true;
+            break;
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : "";
+            if (!message.includes("Task result is not ready")) {
+              throw error;
+            }
+          }
         }
       }
 
@@ -74,11 +96,14 @@ export function useDocumentImportFlow({
         throw new Error("后端任务处理失败，请检查任务详情。");
       }
 
-      const result = await openApiClient.getTaskResult(taskId);
-      if (result.result?.nodes && result.result?.edges) {
+      if (!resultLoaded || !taskResult) {
+        throw new Error("任务仍在处理中，请稍后从任务列表继续加载结果。");
+      }
+
+      if (taskResult.result?.nodes && taskResult.result?.edges) {
         const importedDocument = parseGraphDocument(
           JSON.stringify({
-            data: result.result,
+            data: taskResult.result,
           }),
         );
         await runAutoLayout(importedDocument, {

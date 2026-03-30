@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto";
+import { readFileSync } from "fs";
+import path from "path";
 
 import type {
   AiParseResult,
@@ -330,7 +332,10 @@ export function buildGraphResultFromRawAiParseResponse(input: {
       event.eventDescription?.trim() ||
       event.eventID?.trim() ||
       `事件 ${index + 1}`;
-    const eventId = event.eventID?.trim() || createId(`event_${input.taskId}_${index + 1}`);
+    const rawEventId = event.eventID?.trim();
+    const eventId = rawEventId
+      ? createId(`event_${input.taskId}_${rawEventId}`)
+      : createId(`event_${input.taskId}_${index + 1}`);
     const eventNode: GraphNode = {
       id: eventId,
       graphId: input.graphId,
@@ -339,7 +344,7 @@ export function buildGraphResultFromRawAiParseResponse(input: {
       properties: {
         inferredBy: "ai-raw-result",
         sourceType: input.sourceType,
-        eventID: event.eventID?.trim() || eventId,
+        eventID: rawEventId || eventId,
         eventDescription: event.eventDescription?.trim() || "",
         eventOverview: event.eventOverview?.trim() || "",
         name1: event.name1?.trim() || "",
@@ -420,206 +425,175 @@ export function buildSyntheticRawAiParseResponse(input: {
   title: string;
   content?: string;
 }): AiRawParseResponse {
+  const fixedTimestamp = "2026-03-29T11:39:07.000Z";
+
+  const interrogatedPerson = [
+    {
+      id: "1",
+      name: "丁传某",
+      sex: "男",
+      birthday: "1994年**月**日",
+      IDnumber: "3426231994********",
+      regPlace: "安徽省芜湖市无为市泉塘镇",
+      nowPlace: "安徽省芜湖市无为市泉塘镇",
+      occupation: "无固定职业",
+      family: "父亲:丁仁某,70岁,在家务农;母亲:范桂某,67岁,在家务农",
+      criminal: "2024年6月份,在菲律宾因涉嫌诈骗被遣返回到中国,之后被上海嘉定公安局取保候审",
+      remark: "QQ昵称:钱难*",
+    },
+    {
+      id: "2",
+      name: "方升某",
+      sex: "男",
+      birthday: "2004-**-**",
+      IDnumber: "5306272004********",
+      regPlace: "云南省昭通市镇雄县盐源镇",
+      nowPlace: "云南省昭通市镇雄县盐源镇",
+      occupation: "高中肄业，曾做服务员、工地工作",
+      family: "父亲:方先某,40岁左右,在老家;母亲:文朝某,40岁左右,在杭州务工",
+      criminal: "没有",
+      remark: "抖音号:unfruitful*****,昵称:unfruitfu*****;QQ昵称:晚秋;微信昵称:.",
+    },
+    {
+      id: "3",
+      name: "朱明某",
+      sex: "男",
+      birthday: "1994年10月18日",
+      IDnumber: "45051219941*****",
+      regPlace: "广西北海市兴港镇",
+      nowPlace: "广西北海市兴港镇",
+      occupation: "无业",
+      family: "父亲:朱光某,年龄:54岁,职业:无业;母亲:梁娟某,年龄:54岁,职业:无业,联系方式:手机:137077*****;妹妹:朱明某,年龄:28岁,职业:北海市海城区**小学教书",
+      criminal: "无",
+      remark: "未婚,初中文化程度,护照号码:EE26****",
+    },
+    {
+      id: "4",
+      name: "梁靖某",
+      sex: "男",
+      birthday: "2006年**月**日",
+      IDnumber: "5224242006******",
+      regPlace: "贵州省毕节市金沙县后山镇",
+      nowPlace: "贵州省毕节市金沙县后山镇",
+      occupation: "初中文化程度，曾打工",
+      family: "父亲:梁彬某,38岁,在老家工作;母亲:罗思某,38岁,现在在老家",
+      criminal: "没有",
+      remark: "涉嫌偷渡到柬埔寨从事电诈工作",
+    },
+    {
+      id: "5",
+      name: "罗某",
+      sex: "男",
+      birthday: "2005年**月**日",
+      IDnumber: "5101312005********",
+      regPlace: "四川省浦江县寿安街道",
+      nowPlace: "四川省浦江县寿安街道围镇",
+      occupation: "无业",
+      family: "父亲罗江某，45岁，在老家务工；母亲李燕某，45岁，在成都务工，电话号码是：17340****",
+      criminal: "2024年因出借银行卡被成都市浦江县人民法院判处有期徒刑6个月，缓刑1年，2025年6月5日缓刑结束",
+      remark: "微信号：A-B-C****，微信昵称是：1；微信号是：wxid_xugca*****，微信昵称是：“”；QQ号是：3096****，QQ昵称是：陈浩南；支付宝账号：183493****，支付宝昵称是：“无”",
+    },
+    {
+      id: "6",
+      name: "高路某",
+      sex: "男",
+      birthday: "1982-11-11",
+      IDnumber: "372301198211111111",
+      regPlace: "山东省滨州市滨城市里",
+      nowPlace: "广西南宁市西乡塘区安吉大道",
+      occupation: "零工",
+      family: "妻子:蒙金某,43岁,在南宁务工;大女儿:高裕某,11岁,在南宁**小学读书;小女儿:高裕某,9岁,在南宁**小学读书",
+      criminal: "多年前在山东被公安机关治安处罚过一次",
+      remark: "微信有两个,分别为微信昵称:紫气东来,微信号:wxid_pi8idzs*******;微信昵称:时来运转,微信号:wxid_5wj1m97*******",
+    },
+    {
+      id: "7",
+      name: "魏某",
+      sex: "男",
+      birthday: "1998年**月**日",
+      IDnumber: "3204821998*******",
+      regPlace: "江苏省常州市金坛区儒林镇",
+      nowPlace: "江苏省常州市金坛区儒林镇",
+      occupation: "无工作",
+      family: "父亲:魏泉某,53岁,在家务农;母亲:周云某,51岁,在家务农",
+      criminal: "无",
+      remark: "中专文化程度,汉族,认罪认罚",
+    },
+    {
+      id: "8",
+      name: "黄某",
+      sex: "男",
+      birthday: "2001年**月**日",
+      IDnumber: "5224242001********",
+      regPlace: "贵州省金沙县后山镇",
+      nowPlace: "贵州省金沙县后山镇",
+      occupation: "无业",
+      family: "父亲:黄朝某,60岁,在浙江省工作;母亲:汪章某,47岁,在浙江省工作",
+      criminal: "无",
+      remark: "中专文化程度,汉族",
+    },
+  ];
+
+  const eventPerson = [
+    { name: "152961*****" },
+    { name: "自称本地人的男子" },
+    { name: "顺水推舟" },
+    { name: "警察" },
+    { name: "阿明" },
+    { name: "钉钉/QQ联系人" },
+    { name: "穿黄色外套的男子" },
+    { name: "D钓鱼老板" },
+    { name: "中间排肥肥男子" },
+    { name: "江琴芳" },
+    { name: "对方" },
+    { name: "阿伦" },
+    { name: "大师兄" },
+    { name: "田德某" },
+    { name: "黄头发男子" },
+    { name: "年轻男子" },
+    { name: "抖音联系人" },
+  ];
+
+  const events = (() => {
+    try {
+      const filePath = path.join(process.cwd(), "Agent", "Last_Out", "Last_output.json");
+      const parsed = JSON.parse(readFileSync(filePath, "utf8")) as {
+        案件事件三元组?: Array<{
+          人物A名称?: string;
+          人物B名称?: string;
+          行为序列?: string[];
+          简介?: string;
+        }>;
+      };
+
+      const triples = parsed.案件事件三元组 ?? [];
+      return triples.map((item, index) => ({
+        eventID: String(index + 1),
+        name1: item.人物A名称 ?? "",
+        name2: item.人物B名称 ?? "",
+        eventDescription: Array.isArray(item.行为序列) ? item.行为序列.join("\n") : "",
+        eventOverview: item.简介 ?? "",
+      }));
+    } catch {
+      return [];
+    }
+  })();
+
   return {
     taskId: input.taskId,
+    projectId: "我这边不提供这个，需要数据库去进行累计判断",
     type: "merge",
     result: {
       meta: {
         provider: "default",
         model: "deepseek",
       },
-      interrogatedPerson: [
-        {
-          id: "person_1",
-          name: "高某某",
-          sex: "男",
-          birthday: "1982年**月**日",
-          IDnumber: "3723011982********",
-          regPlace: "山东省滨州市滨城区里",
-          nowPlace: "广西南宁市西乡塘区安吉大道",
-          occupation: "打零工",
-          family: "妻子：蒙金某，43岁；大女儿：高裕某，11岁；小女儿：高裕某，9岁",
-          criminal: "多年前在山东被公安机关治安处罚过一次，具体事项不详",
-          remark: "运送他人偷渡，驾驶员",
-        },
-        {
-          id: "person_2",
-          name: "朱明某",
-          sex: "男",
-          birthday: "1994年10月18日",
-          IDnumber: "4505121994********",
-          regPlace: "广西北海市兴港镇",
-          nowPlace: "广西北海市兴港镇",
-          occupation: "无业",
-          family: "父亲：朱光某，54岁；母亲：梁娟某，54岁；妹妹：朱明某，28岁",
-          criminal: "无",
-          remark: "偷渡人员，目的地越南",
-        },
-        {
-          id: "person_3",
-          name: "方升某",
-          sex: "男",
-          birthday: "2004年**月**日",
-          IDnumber: "5306272004********",
-          regPlace: "云南省昭通市镇雄县盐源镇",
-          nowPlace: "云南省昭通市镇雄县盐源镇",
-          occupation: "无固定职业（服务员等）",
-          family: "父亲：方先某，40岁左右；母亲：文朝某，40岁左右",
-          criminal: "无",
-          remark: "偷渡人员，目的地新加坡，从事洗钱",
-        },
-        {
-          id: "person_4",
-          name: "丁传某",
-          sex: "男",
-          birthday: "1994年**月**日",
-          IDnumber: "3426231994********",
-          regPlace: "安徽省芜湖市无为市泉塘镇",
-          nowPlace: "安徽省芜湖市无为市泉塘镇",
-          occupation: "无固定职业",
-          family: "父亲：丁仁某，70岁；母亲：范桂某，67岁",
-          criminal: "2024年6月在菲律宾因涉嫌诈骗被遣返，后被上海嘉定公安局取保候审",
-          remark: "偷渡人员，目的地柬埔寨，从事六合彩工作",
-        },
-        {
-          id: "person_5",
-          name: "梁靖某",
-          sex: "男",
-          birthday: "2006年**月**日",
-          IDnumber: "5224242006********",
-          regPlace: "贵州省毕节市金沙县后山镇",
-          nowPlace: "贵州省毕节市金沙县后山镇",
-          occupation: "无固定职业",
-          family: "父亲：梁彬某，38岁；母亲：罗思某，38岁",
-          criminal: "无",
-          remark: "偷渡人员，目的地柬埔寨，从事电诈",
-        },
-        {
-          id: "person_6",
-          name: "罗某",
-          sex: "男",
-          birthday: "2005年**月**日",
-          IDnumber: "5101312005********",
-          regPlace: "四川省浦江县寿安街道",
-          nowPlace: "四川省浦江县寿安街道围镇",
-          occupation: "无业",
-          family: "父亲：罗江某，45岁；母亲：李燕某，45岁",
-          criminal: "2024年因出借银行卡被成都市浦江县人民法院判处有期徒刑6个月，缓刑1年，2025年6月5日缓刑结束",
-          remark: "偷渡人员，目的地柬埔寨，从事电诈",
-        },
-        {
-          id: "person_7",
-          name: "黄某",
-          sex: "男",
-          birthday: "2001年**月**日",
-          IDnumber: "5224242001********",
-          regPlace: "贵州省金沙县后山镇",
-          nowPlace: "贵州省金沙县后山镇",
-          occupation: "无业",
-          family: "父亲：黄朝某，60岁；母亲：汪章某，47岁",
-          criminal: "无",
-          remark: "偷渡人员，目的地柬埔寨，从事电诈",
-        },
-        {
-          id: "person_8",
-          name: "魏某",
-          sex: "男",
-          birthday: "1998年**月**日",
-          IDnumber: "3204821998********",
-          regPlace: "江苏省常州市金坛区儒林镇",
-          nowPlace: "江苏省常州市金坛区儒林镇",
-          occupation: "无业",
-          family: "父亲：魏泉某，53岁；母亲：周云某，51岁",
-          criminal: "无",
-          remark: "偷渡人员，目的地不明，声称从事走私香烟",
-        },
-      ],
-      eventPerson: [
-        { name: "高某某" },
-        { name: "朱明某" },
-        { name: "方升某" },
-        { name: "丁传某" },
-        { name: "梁靖某" },
-        { name: "罗某" },
-        { name: "黄某" },
-        { name: "魏某" },
-        { name: "D钓鱼老板" },
-        { name: "阿伦" },
-        { name: "阿明" },
-        { name: "大师兄" },
-        { name: "黄涛" },
-        { name: "田德某" },
-        { name: "江琴芳" },
-      ],
-      events: [
-        {
-          eventID: "event_1",
-          name1: "高某某",
-          name2: "D钓鱼老板",
-          eventDescription:
-            "高某某受‘D钓鱼老板’指使，于2025年11月7日晚驾驶一辆无牌黑色比亚迪SUV，在广西合浦县搭载朱明某、方升某、丁传某、梁靖某、罗某、黄某、魏某等7名欲偷渡出境人员，前往钦州港三墩码头，途中被公安机关查获。高某某收取1000元报酬，明知运送人员偷渡仍实施该行为。",
-          eventOverview: "运送他人偷渡",
-        },
-        {
-          eventID: "event_2",
-          name1: "朱明某",
-          name2: "阿伦",
-          eventDescription:
-            "朱明某受‘阿伦’安排，于2025年11月7日晚在合浦县昌和大酒店附近，乘坐高某某驾驶的车辆欲偷渡至越南，在途中被查获。朱明某清楚偷渡目的，且有境外工作意向。",
-          eventOverview: "偷渡出境（越南）",
-        },
-        {
-          eventID: "event_3",
-          name1: "方升某",
-          name2: "上家（钉钉联系人）",
-          eventDescription:
-            "方升某通过网络联系境外上家，欲偷渡至新加坡从事洗钱活动，上家为其购买车票并安排接应。2025年11月7日晚，方升某在合浦县乘坐高某某车辆前往偷渡点途中被查获。",
-          eventOverview: "偷渡出境（新加坡）",
-        },
-        {
-          eventID: "event_4",
-          name1: "丁传某",
-          name2: "阿明",
-          eventDescription:
-            "丁传某受‘阿明’招募，欲偷渡至柬埔寨从事六合彩赌博相关工作。2025年11月7日晚，丁传某在合浦县某酒店门口乘坐高某某车辆，前往偷渡点途中被查获。",
-          eventOverview: "偷渡出境（柬埔寨）",
-        },
-        {
-          eventID: "event_5",
-          name1: "梁靖某",
-          name2: "黄某",
-          eventDescription:
-            "梁靖某与黄某结伙，通过网络联系境外上家，欲偷渡至柬埔寨从事电信诈骗。2025年11月7日，二人由田德某驾车送至合浦县，后乘坐高某某车辆前往偷渡点途中被查获。",
-          eventOverview: "结伙偷渡出境（柬埔寨）",
-        },
-        {
-          eventID: "event_6",
-          name1: "罗某",
-          name2: "大师兄",
-          eventDescription:
-            "罗某受境外‘大师兄’招募，欲偷渡至柬埔寨从事电信诈骗。2025年11月7日晚，罗某在合浦县昌和大酒店乘坐高某某车辆前往偷渡点途中被查获。",
-          eventOverview: "偷渡出境（柬埔寨）",
-        },
-        {
-          eventID: "event_7",
-          name1: "魏某",
-          name2: "上家（QQ联系人）",
-          eventDescription:
-            "魏某通过网络联系上家，欲偷渡出境从事走私香烟活动。2025年11月7日晚，魏某在合浦县乘坐高某某车辆前往偷渡点途中被查获。",
-          eventOverview: "偷渡出境",
-        },
-        {
-          eventID: "event_8",
-          name1: "田德某",
-          name2: "江琴芳",
-          eventDescription:
-            "田德某与江琴芳受梁靖某、黄某欺骗，驾车将二人从贵州金沙县送至广西北海市，以为二人系前往游玩，对二人偷渡计划不知情。",
-          eventOverview: "被利用运送偷渡人员",
-        },
-      ],
+      interrogatedPerson,
+      eventPerson,
+      events,
     },
-    errorMessage: null,
-    createdAt: "2026-03-27T00:00:00.000Z",
-    updatedAt: "2026-03-27T00:00:00.000Z",
+    errorMessage: "",
+    createdAt: fixedTimestamp,
+    updatedAt: fixedTimestamp,
   };
 }

@@ -57,7 +57,6 @@ import type { Task } from "@/lib/domain/models";
 import { cn } from "@/lib/utils";
 
 import {
-  BACKEND_GRAPH_ID,
   DEFAULT_FILE_NAME,
   EXPORT_IMAGE_PLACEHOLDER,
   EXPORT_MIN_HEIGHT,
@@ -159,7 +158,6 @@ export function GraphEditor() {
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [isImportingLayout, setIsImportingLayout] = useState(false);
   const [isDocumentImportDialogOpen, setIsDocumentImportDialogOpen] = useState(false);
-  const [isBackendSyncing, setIsBackendSyncing] = useState(false);
   const [canvasBackgroundMode, setCanvasBackgroundMode] = useState<"grid" | "plain">("plain");
   const [isBackgroundMenuOpen, setIsBackgroundMenuOpen] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
@@ -169,6 +167,7 @@ export function GraphEditor() {
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const suppressNextEmptySelectionRef = useRef(false);
   const autoSaveTimeoutRef = useRef<number | null>(null);
   const historyRef = useRef<GraphDocument[]>([structuredClone(sampleDocument)]);
   const futureRef = useRef<GraphDocument[]>([]);
@@ -200,6 +199,7 @@ export function GraphEditor() {
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const selectedEdgeLabelOwner = edges.find((edge) => edge.id === selectedEdgeLabelId) ?? null;
+  const inspectedEdge = selectedEdge ?? selectedEdgeLabelOwner ?? null;
   const activeWorkspaceFile = workspaceFiles.find((file) => file.id === activeFileId) ?? null;
   const selectedWorkspaceFile = workspaceFiles.find((file) => file.id === selectedWorkspaceFileId) ?? null;
   const selectedWorkspaceFilePreview = useMemo(
@@ -220,18 +220,47 @@ export function GraphEditor() {
   const isCanvasEmpty = nodes.length === 0 && edges.length === 0;
   const shapeNodeCount = nodes.filter((node) => node.type === "shapeNode").length;
   const selectedEdgeData: RelationEdgeData = {
-    pathStyle: selectedEdge?.data?.pathStyle ?? defaultRelationEdgeData.pathStyle,
-    dashed: selectedEdge?.data?.dashed ?? defaultRelationEdgeData.dashed,
-    marker: selectedEdge?.data?.marker ?? defaultRelationEdgeData.marker,
-    color: selectedEdge?.data?.color ?? defaultRelationEdgeData.color,
-    labelOffset: selectedEdge?.data?.labelOffset,
-    labelAnchorPosition: selectedEdge?.data?.labelAnchorPosition,
-    manualRoute: selectedEdge?.data?.manualRoute,
-    manualRouteMode: selectedEdge?.data?.manualRouteMode,
+    pathStyle: inspectedEdge?.data?.pathStyle ?? defaultRelationEdgeData.pathStyle,
+    dashed: inspectedEdge?.data?.dashed ?? defaultRelationEdgeData.dashed,
+    marker: inspectedEdge?.data?.marker ?? defaultRelationEdgeData.marker,
+    color: inspectedEdge?.data?.color ?? defaultRelationEdgeData.color,
+    labelOffset: inspectedEdge?.data?.labelOffset,
+    labelAnchorPosition: inspectedEdge?.data?.labelAnchorPosition,
+    manualRoute: inspectedEdge?.data?.manualRoute,
+    manualRouteMode: inspectedEdge?.data?.manualRouteMode,
+    isEventEdge: inspectedEdge?.data?.isEventEdge,
+    eventID: inspectedEdge?.data?.eventID,
+    eventOverview: inspectedEdge?.data?.eventOverview,
+    eventDescription: inspectedEdge?.data?.eventDescription,
+    eventName1: inspectedEdge?.data?.eventName1,
+    eventName2: inspectedEdge?.data?.eventName2,
   };
   const selectedEdgeLabelText = typeof selectedEdgeLabelOwner?.label === "string" ? selectedEdgeLabelOwner.label : "";
   const selectedShapeNode = isShapeNode(selectedNode) ? selectedNode : null;
   const selectedEdgeLabel = typeof selectedEdge?.label === "string" ? selectedEdge.label : "";
+  const selectedEventInspectorEdge =
+    selectedEdge?.data?.isEventEdge === true
+      ? selectedEdge
+      : selectedEdgeLabelOwner?.data?.isEventEdge === true
+        ? selectedEdgeLabelOwner
+        : null;
+
+  const getNodeEventDisplayName = useCallback(
+    (nodeId: string) => {
+      const node = nodes.find((item) => item.id === nodeId);
+      if (!node || node.type !== "shapeNode") {
+        return "";
+      }
+
+      const firstLine = node.data.text
+        .split("\n")
+        .map((line) => line.trim())
+        .find(Boolean);
+
+      return firstLine ?? "";
+    },
+    [nodes],
+  );
 
   useEffect(() => {
     workspaceFilesRef.current = workspaceFiles;
@@ -392,6 +421,7 @@ export function GraphEditor() {
         return;
       }
 
+      suppressNextEmptySelectionRef.current = true;
       syncSelectionState({
         nodeIds: [],
         edgeIds: [detail.edgeId],
@@ -1552,7 +1582,12 @@ export function GraphEditor() {
           data: {
             pathStyle: "smoothstep",
             dashed: false,
-            marker: "arrow",
+            marker: "none",
+            isEventEdge: true,
+            eventOverview: "",
+            eventDescription: "",
+            eventName1: getNodeEventDisplayName(connection.source),
+            eventName2: getNodeEventDisplayName(connection.target),
           },
         },
         edges.length,
@@ -1565,9 +1600,9 @@ export function GraphEditor() {
         primaryNodeId: null,
         primaryEdgeId: nextEdge.id,
       });
-      setStatus("已新增连线，可双击标签输入说明，也可在右侧继续微调样式。");
+      setStatus("已新增事件连线，可直接填写事件概述和完整描述。");
     },
-    [edges, setEdges, syncSelectionState],
+    [edges, getNodeEventDisplayName, setEdges, syncSelectionState],
   );
 
   const handleReconnect = useCallback(
@@ -1626,6 +1661,17 @@ export function GraphEditor() {
     (params: OnSelectionChangeParams<Node, AppEdge>) => {
       const nextNodeIds = params.nodes.map((node) => node.id);
       const nextEdgeIds = params.edges.map((edge) => edge.id);
+
+      if (
+        suppressNextEmptySelectionRef.current &&
+        nextNodeIds.length === 0 &&
+        nextEdgeIds.length === 0
+      ) {
+        suppressNextEmptySelectionRef.current = false;
+        return;
+      }
+
+      suppressNextEmptySelectionRef.current = false;
 
       syncSelectionState({
         nodeIds: nextNodeIds,
@@ -2241,23 +2287,6 @@ export function GraphEditor() {
     applyDocument(createSampleGraphDocument(), "已重置为新的示例关系图。");
   }, [applyDocument]);
 
-  const handleLoadFromBackend = useCallback(async () => {
-    setIsBackendSyncing(true);
-    try {
-      const graphView = await openApiClient.getGraphView(BACKEND_GRAPH_ID);
-      const backendDocument = parseGraphDocument(
-        JSON.stringify({
-          data: graphView,
-        }),
-      );
-      applyDocument(backendDocument, "已从后端加载最新图谱。");
-    } catch (error: unknown) {
-      setStatus(error instanceof Error ? `后端加载失败：${error.message}` : "后端加载失败，请稍后重试。");
-    } finally {
-      setIsBackendSyncing(false);
-    }
-  }, [applyDocument]);
-
   const handleFitView = useCallback(async () => {
     const nextViewport = await fitViewportToScene();
 
@@ -2363,6 +2392,7 @@ export function GraphEditor() {
           id: edge.id,
           label: typeof edge.label === "string" ? edge.label : "",
           data: {
+            ...edge.data,
             pathStyle: patch.pathStyle ?? edge.data?.pathStyle ?? defaultRelationEdgeData.pathStyle,
             dashed: patch.dashed ?? edge.data?.dashed ?? defaultRelationEdgeData.dashed,
             marker: patch.marker ?? edge.data?.marker ?? defaultRelationEdgeData.marker,
@@ -2371,6 +2401,12 @@ export function GraphEditor() {
             labelAnchorPosition: patch.labelAnchorPosition ?? edge.data?.labelAnchorPosition,
             manualRoute: patch.manualRoute ?? edge.data?.manualRoute,
             manualRouteMode: patch.manualRouteMode ?? edge.data?.manualRouteMode,
+            isEventEdge: patch.isEventEdge ?? edge.data?.isEventEdge,
+            eventID: patch.eventID ?? edge.data?.eventID,
+            eventOverview: patch.eventOverview ?? edge.data?.eventOverview,
+            eventDescription: patch.eventDescription ?? edge.data?.eventDescription,
+            eventName1: patch.eventName1 ?? edge.data?.eventName1,
+            eventName2: patch.eventName2 ?? edge.data?.eventName2,
           },
         }),
       );
@@ -2385,7 +2421,60 @@ export function GraphEditor() {
           ...edge,
           id: edge.id,
           label,
-          data: edge.data,
+          data: {
+            pathStyle: edge.data?.pathStyle ?? defaultRelationEdgeData.pathStyle,
+            dashed: edge.data?.dashed ?? defaultRelationEdgeData.dashed,
+            marker: edge.data?.marker ?? defaultRelationEdgeData.marker,
+            color: edge.data?.color ?? defaultRelationEdgeData.color,
+            labelOffset: edge.data?.labelOffset,
+            labelAnchorPosition: edge.data?.labelAnchorPosition,
+            labelPlacementMode: edge.data?.labelPlacementMode,
+            manualRoute: edge.data?.manualRoute,
+            manualRouteMode: edge.data?.manualRouteMode,
+            isEventEdge: edge.data?.isEventEdge,
+            eventID: edge.data?.eventID,
+            eventDescription: edge.data?.eventDescription,
+            eventName1: edge.data?.eventName1,
+            eventName2: edge.data?.eventName2,
+            ...(edge.data?.isEventEdge
+              ? {
+                  eventOverview: label,
+                }
+              : {
+                  eventOverview: edge.data?.eventOverview,
+                }
+            ),
+          },
+        }),
+      );
+    },
+    [updateEdge],
+  );
+
+  const updateSelectedEventDescription = useCallback(
+    (eventDescription: string) => {
+      updateEdge((edge) =>
+        createRelationEdge({
+          ...edge,
+          id: edge.id,
+          label: typeof edge.label === "string" ? edge.label : "",
+          data: {
+            pathStyle: edge.data?.pathStyle ?? defaultRelationEdgeData.pathStyle,
+            dashed: edge.data?.dashed ?? defaultRelationEdgeData.dashed,
+            marker: edge.data?.marker ?? defaultRelationEdgeData.marker,
+            color: edge.data?.color ?? defaultRelationEdgeData.color,
+            labelOffset: edge.data?.labelOffset,
+            labelAnchorPosition: edge.data?.labelAnchorPosition,
+            labelPlacementMode: edge.data?.labelPlacementMode,
+            manualRoute: edge.data?.manualRoute,
+            manualRouteMode: edge.data?.manualRouteMode,
+            isEventEdge: edge.data?.isEventEdge,
+            eventID: edge.data?.eventID,
+            eventOverview: edge.data?.eventOverview,
+            eventDescription,
+            eventName1: edge.data?.eventName1,
+            eventName2: edge.data?.eventName2,
+          },
         }),
       );
     },
@@ -2758,16 +2847,6 @@ export function GraphEditor() {
           >
             <RefreshCcw className="size-4" />
             {"\u91cd\u7f6e"}
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className={toolbarButtonClassName}
-            onClick={() => void handleLoadFromBackend()}
-            disabled={isBackendSyncing}
-          >
-            <RefreshCcw className="size-4" />
-            {isBackendSyncing ? "加载中..." : "从后端加载"}
           </Button>
           <Button
             type="button"
@@ -3166,6 +3245,110 @@ export function GraphEditor() {
                     >
                       <Trash2 className="size-4" />
                       {"\u5220\u9664\u56fe\u5f62"}
+                    </Button>
+                  </div>
+                </SectionCard>
+              </>
+            ) : selectedEventInspectorEdge ? (
+              <>
+                <SectionCard title="事件详情" description="事件不再显示为节点框，完整信息集中展示在这里。">
+                  <div className="space-y-4">
+                    <Field label="事件概述">
+                      <input
+                        className={inputClassName}
+                        value={typeof selectedEventInspectorEdge.label === "string" ? selectedEventInspectorEdge.label : ""}
+                        placeholder="输入事件概述"
+                        onChange={(event) => updateSelectedEdgeLabel(event.target.value)}
+                      />
+                    </Field>
+
+                    <Field label="完整描述">
+                      <textarea
+                        className={cn(inputClassName, "min-h-40 resize-none text-sm leading-6")}
+                        value={selectedEventInspectorEdge.data?.eventDescription ?? ""}
+                        placeholder="输入事件的详细描述"
+                        onChange={(event) => updateSelectedEventDescription(event.target.value)}
+                      />
+                    </Field>
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="连线样式" description="事件显示在线中间，连线仍可按现有方式调整路径。">
+                  <div className="space-y-4">
+                    <Field label="连线形态">
+                      <div className="grid grid-cols-3 gap-2">
+                        {pathStyleOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={cn(
+                              segmentButtonClassName,
+                              selectedEdgeData.pathStyle === option.value
+                                ? "border-sky-300 bg-sky-50 text-sky-700"
+                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+                            )}
+                            onClick={() => updateEdgeData({ pathStyle: option.value })}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+
+                    <button
+                      type="button"
+                      className={cn(
+                        segmentButtonClassName,
+                        "flex w-full",
+                        selectedEdgeData.dashed
+                          ? "border-sky-300 bg-sky-50 text-sky-700"
+                          : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+                      )}
+                      onClick={() => updateEdgeData({ dashed: !selectedEdgeData.dashed })}
+                    >
+                      {selectedEdgeData.dashed ? "当前为虚线，点击切换为实线" : "当前为实线，点击切换为虚线"}
+                    </button>
+                    <Field label="箭头样式">
+                      <div className="grid grid-cols-2 gap-2">
+                        {markerOptions.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            className={cn(
+                              segmentButtonClassName,
+                              selectedEdgeData.marker === option.value
+                                ? "border-sky-300 bg-sky-50 text-sky-700"
+                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+                            )}
+                            onClick={() => updateEdgeData({ marker: option.value })}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="快捷操作" description="这里删除的是整条事件连线，不会回退成事件节点。">
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                      onClick={() => updateSelectedEdgeLabel("")}
+                      disabled={!selectedEventInspectorEdge.label}
+                    >
+                      {"\u5220\u9664\u8bf4\u660e"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
+                      onClick={() => handleDeleteEdge(selectedEventInspectorEdge.id)}
+                    >
+                      <Trash2 className="size-4" />
+                      {"\u5220\u9664\u8fde\u7ebf"}
                     </Button>
                   </div>
                 </SectionCard>

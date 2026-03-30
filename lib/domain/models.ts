@@ -259,15 +259,25 @@ export interface AiRawEvent {
   eventOverview?: string;
 }
 
+export interface AiTriple {
+  人物A名称: string;
+  人物A所扮演角色: string;
+  人物B名称: string;
+  人物B所扮演角色: string;
+  简介: string[];
+}
+
 export interface AiRawParseResult {
   meta: AiRawParseMeta;
   interrogatedPerson: AiInterrogatedPerson[];
   eventPerson: AiEventPerson[];
   events: AiRawEvent[];
+  案件事件三元组?: AiTriple[];
 }
 
 export interface AiRawParseResponse {
   taskId: string;
+  projectId?: string;
   type: string;
   result: AiRawParseResult;
   errorMessage?: string | null;

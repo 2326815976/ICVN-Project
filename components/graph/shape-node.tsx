@@ -103,13 +103,15 @@ export function ShapeNode({ id, data, selected, width, height }: NodeProps<AppNo
 
   const hasText = nodeData.text.trim().length > 0;
   const hasImage = Boolean(nodeData.imageUrl);
+  const textLines = (editing ? draft : nodeData.text)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
   const visibleLineCount = Math.max(
-    (editing ? draft : nodeData.text)
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean).length,
+    textLines.length,
     1,
   );
+  const shouldLeftAlignText = textLines.length > 1 && textLines.some((line) => /[：:]/.test(line));
   const editorMinHeight = Math.min(Math.max(visibleLineCount * 24 + 8, 40), 104);
   const contentMinHeight = hasImage
     ? Math.min(Math.max(visibleLineCount * 24 + 84, 92), 148)
@@ -229,7 +231,10 @@ export function ShapeNode({ id, data, selected, width, height }: NodeProps<AppNo
       value={draft}
       rows={Math.max(visibleLineCount, 1)}
       placeholder="输入文字"
-      className="nodrag nopan w-full resize-none border-none bg-transparent text-center text-base font-medium leading-6 outline-none placeholder:text-slate-300"
+      className={cn(
+        "nodrag nopan w-full resize-none border-none bg-transparent text-base font-medium leading-6 outline-none placeholder:text-slate-300",
+        shouldLeftAlignText ? "text-left" : "text-center",
+      )}
       style={{
         color: nodeData.textColor,
         minHeight: `${editorMinHeight}px`,
@@ -251,7 +256,10 @@ export function ShapeNode({ id, data, selected, width, height }: NodeProps<AppNo
     />
   ) : (
     <div
-      className="flex flex-col items-center justify-center gap-3 text-center"
+      className={cn(
+        "flex flex-col justify-center gap-3",
+        shouldLeftAlignText ? "items-start text-left" : "items-center text-center",
+      )}
       style={{ minHeight: `${contentMinHeight}px` }}
     >
       {hasImage ? (
@@ -267,7 +275,7 @@ export function ShapeNode({ id, data, selected, width, height }: NodeProps<AppNo
         </div>
       ) : null}
       {hasText ? (
-        <div className="max-w-full whitespace-pre-wrap break-all text-base font-medium leading-6">
+        <div className={cn("max-w-full whitespace-pre-wrap break-all text-base font-medium leading-6", shouldLeftAlignText && "w-full")}>
           {nodeData.text}
         </div>
       ) : selected ? (

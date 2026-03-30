@@ -146,6 +146,12 @@ export type RelationEdgeData = {
   labelPlacementMode?: EdgeLabelPlacementMode;
   manualRoute?: EdgeRoutePoint[];
   manualRouteMode?: EdgeRouteMode;
+  isEventEdge?: boolean;
+  eventID?: string;
+  eventOverview?: string;
+  eventDescription?: string;
+  eventName1?: string;
+  eventName2?: string;
 };
 
 export type ShapeNode = Node<ShapeNodeData, "shapeNode">;
@@ -353,6 +359,12 @@ export function createRelationEdge(partial: Partial<AppEdge> = {}, index = 0): A
   const labelPlacementMode = isEdgeLabelPlacementMode(data.labelPlacementMode) ? data.labelPlacementMode : undefined;
   const manualRoute = isEdgeRoutePoints(data.manualRoute) ? data.manualRoute : undefined;
   const manualRouteMode = isEdgeRouteMode(data.manualRouteMode) ? data.manualRouteMode : undefined;
+  const isEventEdge = typeof data.isEventEdge === "boolean" ? data.isEventEdge : undefined;
+  const eventID = typeof data.eventID === "string" ? data.eventID : undefined;
+  const eventOverview = typeof data.eventOverview === "string" ? data.eventOverview : undefined;
+  const eventDescription = typeof data.eventDescription === "string" ? data.eventDescription : undefined;
+  const eventName1 = typeof data.eventName1 === "string" ? data.eventName1 : undefined;
+  const eventName2 = typeof data.eventName2 === "string" ? data.eventName2 : undefined;
 
   return {
     ...partial,
@@ -373,6 +385,12 @@ export function createRelationEdge(partial: Partial<AppEdge> = {}, index = 0): A
       labelPlacementMode,
       manualRoute,
       manualRouteMode,
+      isEventEdge,
+      eventID,
+      eventOverview,
+      eventDescription,
+      eventName1,
+      eventName2,
     },
     style: buildEdgeStyle({ dashed, color }),
     markerEnd: buildMarkerEnd(marker, color),

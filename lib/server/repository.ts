@@ -1,4 +1,7 @@
 import type { PoolConnection, RowDataPacket } from "mysql2/promise";
+import http from "node:http";
+import https from "node:https";
+import { URL } from "node:url";
 
 import type {
   AiParseRequest,
@@ -41,7 +44,6 @@ import { createSubgraph } from "@/lib/server/graph-queries";
 import { withConnection, withTransaction } from "@/lib/server/db";
 import {
   buildGraphResultFromRawAiParseResponse,
-  buildSyntheticRawAiParseResponse,
   coerceRecord,
   coerceStringArray,
   createId,
@@ -53,36 +55,10 @@ import {
 } from "@/lib/server/utils";
 
 type DbRow = RowDataPacket & Record<string, unknown>;
-type ApiEnvelope<T> = {
-  success: boolean;
-  data?: T;
-  error?: {
-    code?: string;
-    message?: string;
-    details?: unknown;
-  };
-};
 
-function buildMockAiParseResponse(params: {
-  taskId: string;
-  title: string;
-  input: AiParseRequest;
-}) {
-  const contents = params.input.content.map((item) => item.trim()).filter((item) => item.length > 0);
-
-  if (contents.length === 0) {
-    throw new ApiError(400, "BAD_REQUEST", "content is required");
-  }
-
-  const mergedContent = contents.join("\n\n");
-
-  // Current stage uses a simulated AI provider, but all callers must still
-  // go through this single AI parsing entry so the task flow matches production shape.
-  return buildSyntheticRawAiParseResponse({
-    taskId: params.taskId,
-    title: params.title,
-    content: mergedContent,
-  });
+declare global {
+  // In local deployment we keep one in-memory registry to avoid scheduling the same parse twice.
+  var __icvnActiveTaskParsers: Set<string> | undefined;
 }
 
 function getInternalApiBaseUrl() {
@@ -90,9 +66,105 @@ function getInternalApiBaseUrl() {
     process.env.INTERNAL_API_BASE_URL ??
     process.env.APP_BASE_URL ??
     process.env.NEXT_PUBLIC_APP_BASE_URL ??
-    "http://127.0.0.1:3000";
+    "http://127.0.0.1:8000";
 
   return configuredBaseUrl.replace(/\/+$/, "");
+}
+
+function getActiveTaskParsers() {
+  if (!globalThis.__icvnActiveTaskParsers) {
+    globalThis.__icvnActiveTaskParsers = new Set<string>();
+  }
+
+  return globalThis.__icvnActiveTaskParsers;
+}
+
+async function postJsonWithoutHeadersTimeout(url: string, body: unknown) {
+  const targetUrl = new URL(url);
+  const requestBody = JSON.stringify(body);
+  const transport = targetUrl.protocol === "https:" ? https : http;
+
+  return await new Promise<{
+    statusCode: number;
+    payload: unknown;
+  }>((resolve, reject) => {
+    const request = transport.request(
+      targetUrl,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(requestBody),
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+
+        response.on("data", (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+
+        response.on("end", () => {
+          const rawText = Buffer.concat(chunks).toString("utf8");
+
+          if (!rawText.trim()) {
+            resolve({
+              statusCode: response.statusCode ?? 0,
+              payload: null,
+            });
+            return;
+          }
+
+          try {
+            resolve({
+              statusCode: response.statusCode ?? 0,
+              payload: JSON.parse(rawText),
+            });
+          } catch {
+            reject(new ApiError(502, "AI_PARSE_INVALID_RESPONSE", "AI parse upstream returned non-JSON payload"));
+          }
+        });
+      },
+    );
+
+    request.on("error", (error) => {
+      reject(error);
+    });
+
+    request.setTimeout(0);
+    request.write(requestBody);
+    request.end();
+  });
+}
+
+function coerceAiRawParseResponse(payload: unknown, taskId: string): AiRawParseResponse {
+  const root = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
+  const wrappedData =
+    typeof root.data === "object" && root.data !== null ? (root.data as Record<string, unknown>) : root;
+  const result =
+    typeof wrappedData.result === "object" && wrappedData.result !== null
+      ? (wrappedData.result as AiRawParseResponse["result"])
+      : null;
+
+  if (!result) {
+    throw new ApiError(502, "AI_PARSE_INVALID_RESPONSE", "AI parse upstream returned invalid payload");
+  }
+
+  return {
+    taskId: typeof wrappedData.taskId === "string" && wrappedData.taskId.trim() ? wrappedData.taskId : taskId,
+    projectId: typeof wrappedData.projectId === "string" ? wrappedData.projectId : undefined,
+    type: typeof wrappedData.type === "string" && wrappedData.type.trim() ? wrappedData.type : "merge",
+    result,
+    errorMessage: typeof wrappedData.errorMessage === "string" ? wrappedData.errorMessage : null,
+    createdAt:
+      typeof wrappedData.createdAt === "string" && wrappedData.createdAt.trim()
+        ? wrappedData.createdAt
+        : nowIso(),
+    updatedAt:
+      typeof wrappedData.updatedAt === "string" && wrappedData.updatedAt.trim()
+        ? wrappedData.updatedAt
+        : nowIso(),
+  };
 }
 
 async function requestAiParseViaHttp(params: {
@@ -100,42 +172,186 @@ async function requestAiParseViaHttp(params: {
   title: string;
   input: AiParseRequest;
 }) {
-  const response = await fetch(`${getInternalApiBaseUrl()}/api/ai/parse`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    cache: "no-store",
-    body: JSON.stringify({
-      taskId: params.taskId,
-      content: params.input.content,
-    } satisfies AiParseRequest),
+  const requestBody = {
+    taskId: params.taskId,
+    content: params.input.content,
+  } satisfies AiParseRequest;
+
+  console.log("[ai-parse] upstream request content", {
+    taskId: params.taskId,
+    title: params.title,
+    content: requestBody.content,
   });
 
-  let payload: ApiEnvelope<AiRawParseResponse> | null = null;
-
+  let result: { statusCode: number; payload: unknown };
   try {
-    payload = (await response.json()) as ApiEnvelope<AiRawParseResponse>;
-  } catch {
-    payload = null;
+    result = await postJsonWithoutHeadersTimeout(`${getInternalApiBaseUrl()}/api/ai/parse`, requestBody);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+
+    const message =
+      error instanceof Error
+        ? `AI parse upstream request failed: ${error.message}`
+        : "AI parse upstream request failed";
+
+    throw new ApiError(502, "AI_PARSE_UPSTREAM_ERROR", message, {
+      taskId: params.taskId,
+      baseUrl: getInternalApiBaseUrl(),
+    });
   }
 
-  if (!response.ok || !payload?.success || !payload.data) {
-    throw new ApiError(
-      502,
-      "AI_PARSE_REQUEST_FAILED",
-      payload?.error?.message ?? `AI parse request failed with HTTP ${response.status}`,
+  if (result.statusCode < 200 || result.statusCode >= 300) {
+    const upstreamMessage =
+      typeof result.payload === "object" &&
+      result.payload !== null &&
+      typeof (result.payload as { error?: { message?: unknown } }).error?.message === "string"
+        ? (result.payload as { error: { message: string } }).error.message
+        : `AI parse upstream HTTP ${result.statusCode}`;
+    throw new ApiError(502, "AI_PARSE_UPSTREAM_ERROR", upstreamMessage, {
+      taskId: params.taskId,
+      baseUrl: getInternalApiBaseUrl(),
+    });
+  }
+
+  return coerceAiRawParseResponse(result.payload, params.taskId);
+}
+
+async function finalizeTaskParseSuccess(params: {
+  taskId: string;
+  graphId: string;
+  sourceType: Task["sourceType"];
+  rawResult: AiRawParseResponse;
+}) {
+  const result = buildGraphResultFromRawAiParseResponse({
+    graphId: params.graphId,
+    taskId: params.taskId,
+    sourceType: params.sourceType,
+    rawResult: params.rawResult,
+  });
+
+  await withTransaction(async (connection) => {
+    await connection.execute(
+      `
+        INSERT INTO task_results (
+          id, task_id, raw_result, normalized_result, node_count, edge_count, event_count
+        )
+        VALUES (
+          :id, :taskId, :rawResult, :normalizedResult, :nodeCount, :edgeCount, :eventCount
+        )
+        ON DUPLICATE KEY UPDATE
+          raw_result = VALUES(raw_result),
+          normalized_result = VALUES(normalized_result),
+          node_count = VALUES(node_count),
+          edge_count = VALUES(edge_count),
+          event_count = VALUES(event_count),
+          updated_at = CURRENT_TIMESTAMP(3)
+      `,
       {
+        id: createId("trs"),
         taskId: params.taskId,
-        baseUrl: getInternalApiBaseUrl(),
+        rawResult: toJsonString(params.rawResult),
+        normalizedResult: toJsonString(result),
+        nodeCount: result.nodes.length,
+        edgeCount: result.edges.length,
+        eventCount: result.events.length,
       },
     );
+
+    await connection.execute(
+      `
+        UPDATE tasks
+        SET
+          status = 'validated',
+          error_message = NULL,
+          updated_at = CURRENT_TIMESTAMP(3)
+        WHERE id = :taskId
+      `,
+      {
+        taskId: params.taskId,
+      },
+    );
+
+    await appendTaskEvents(connection, params.taskId, [
+      {
+        type: "validated",
+        message: "AI 原始结果与图谱结构化结果已生成。",
+        payload: { status: "validated" },
+      },
+    ]);
+  });
+}
+
+async function finalizeTaskParseFailure(taskId: string, error: unknown) {
+  await withTransaction(async (connection) => {
+    const taskRow = await getTaskRow(connection, taskId);
+    if (!taskRow || String(taskRow.status) === "applied") {
+      return;
+    }
+
+    const errorMessage = truncateText(error instanceof Error ? error.message : "Task parse failed", 500);
+
+    await connection.execute(
+      `
+        UPDATE tasks
+        SET
+          status = 'failed',
+          error_message = :errorMessage,
+          updated_at = CURRENT_TIMESTAMP(3)
+        WHERE id = :taskId
+      `,
+      {
+        taskId,
+        errorMessage,
+      },
+    );
+
+    await appendTaskEvents(connection, taskId, [
+      {
+        type: "failed",
+        message: "任务处理失败。",
+        payload: { status: "failed", error: errorMessage },
+      },
+    ]);
+  });
+}
+
+async function runTaskParseInBackground(params: {
+  taskId: string;
+  graphId: string;
+  title: string;
+  sourceType: Task["sourceType"];
+  content: string[];
+}) {
+  const activeParsers = getActiveTaskParsers();
+  if (activeParsers.has(params.taskId)) {
+    return;
   }
 
-  return {
-    ...payload.data,
-    taskId: params.taskId,
-  } satisfies AiRawParseResponse;
+  activeParsers.add(params.taskId);
+
+  try {
+    const rawResult = await requestAiParseViaHttp({
+      taskId: params.taskId,
+      title: params.title,
+      input: {
+        taskId: params.taskId,
+        content: params.content,
+      },
+    });
+
+    await finalizeTaskParseSuccess({
+      taskId: params.taskId,
+      graphId: params.graphId,
+      sourceType: params.sourceType,
+      rawResult,
+    });
+  } catch (error) {
+    await finalizeTaskParseFailure(params.taskId, error);
+  } finally {
+    activeParsers.delete(params.taskId);
+  }
 }
 
 function asIsoString(value: unknown) {
@@ -577,162 +793,90 @@ export async function parseTaskContent(taskId: string, input: AiParseRequest) {
     throw new ApiError(400, "BAD_REQUEST", "content is required");
   }
 
-  try {
-    return await withTransaction(async (connection) => {
-      const taskRow = await getTaskRow(connection, taskId);
+  const scheduled = await withTransaction(async (connection) => {
+    const taskRow = await getTaskRow(connection, taskId);
 
-      if (!taskRow) {
-        throw new ApiError(404, "TASK_NOT_FOUND", "Task not found");
-      }
-
-      if (String(taskRow.status) === "applied") {
-        throw new ApiError(409, "TASK_NOT_PARSABLE", "Applied task cannot be parsed again");
-      }
-
-      const graphId = String(taskRow.graph_id ?? getDefaultGraphId());
-      const mergedContent = contents.join("\n\n");
-      const contentPreview = truncateText(mergedContent, 200);
-
-      await ensureGraph(connection, graphId);
-      await connection.execute(
-        `
-          UPDATE tasks
-          SET
-            input_text = :inputText,
-            content_preview = :contentPreview,
-            status = 'processing',
-            error_message = NULL,
-            updated_at = CURRENT_TIMESTAMP(3)
-          WHERE id = :taskId
-        `,
-        {
-          taskId,
-          inputText: mergedContent,
-          contentPreview,
-        },
-      );
-
-      await appendTaskEvents(connection, taskId, [
-        {
-          type: "queued",
-          message: "任务内容已接收，已进入 AI 解析队列。",
-          payload: { status: "queued" },
-        },
-        {
-          type: "processing",
-          message: "AI 原始结果正在生成。",
-          payload: { status: "processing" },
-        },
-      ]);
-
-      const rawResult = await requestAiParseViaHttp({
-        taskId,
-        title: String(taskRow.title),
-        input: {
-          taskId,
-          content: contents,
-        },
-      });
-      const result = buildGraphResultFromRawAiParseResponse({
-        graphId,
-        taskId,
-        sourceType: taskRow.source_type as Task["sourceType"],
-        rawResult,
-      });
-
-      await connection.execute(
-        `
-          INSERT INTO task_results (
-            id, task_id, raw_result, normalized_result, node_count, edge_count, event_count
-          )
-          VALUES (
-            :id, :taskId, :rawResult, :normalizedResult, :nodeCount, :edgeCount, :eventCount
-          )
-          ON DUPLICATE KEY UPDATE
-            raw_result = VALUES(raw_result),
-            normalized_result = VALUES(normalized_result),
-            node_count = VALUES(node_count),
-            edge_count = VALUES(edge_count),
-            event_count = VALUES(event_count),
-            updated_at = CURRENT_TIMESTAMP(3)
-        `,
-        {
-          id: createId("trs"),
-          taskId,
-          rawResult: toJsonString(rawResult),
-          normalizedResult: toJsonString(result),
-          nodeCount: result.nodes.length,
-          edgeCount: result.edges.length,
-          eventCount: result.events.length,
-        },
-      );
-      await connection.execute(
-        `
-          UPDATE tasks
-          SET
-            status = 'validated',
-            error_message = NULL,
-            updated_at = CURRENT_TIMESTAMP(3)
-          WHERE id = :taskId
-        `,
-        {
-          taskId,
-        },
-      );
-
-      await appendTaskEvents(connection, taskId, [
-        {
-          type: "validated",
-          message: "AI 原始结果与图谱结构化结果已生成。",
-          payload: { status: "validated" },
-        },
-      ]);
-
-      return {
-        taskId,
-        status: "validated",
-      } satisfies TaskParseResponse;
-    });
-  } catch (error) {
-    if (!(error instanceof ApiError && error.status === 404)) {
-      await withTransaction(async (connection) => {
-        const taskRow = await getTaskRow(connection, taskId);
-        if (!taskRow || String(taskRow.status) === "applied") {
-          return;
-        }
-
-        const errorMessage = truncateText(
-          error instanceof Error ? error.message : "Task parse failed",
-          500,
-        );
-
-        await connection.execute(
-          `
-            UPDATE tasks
-            SET
-              status = 'failed',
-              error_message = :errorMessage,
-              updated_at = CURRENT_TIMESTAMP(3)
-            WHERE id = :taskId
-          `,
-          {
-            taskId,
-            errorMessage,
-          },
-        );
-
-        await appendTaskEvents(connection, taskId, [
-          {
-            type: "failed",
-            message: "任务处理失败。",
-            payload: { status: "failed", error: errorMessage },
-          },
-        ]);
-      });
+    if (!taskRow) {
+      throw new ApiError(404, "TASK_NOT_FOUND", "Task not found");
     }
 
-    throw error;
+    if (String(taskRow.status) === "applied") {
+      throw new ApiError(409, "TASK_NOT_PARSABLE", "Applied task cannot be parsed again");
+    }
+
+    if (String(taskRow.status) === "processing" || String(taskRow.status) === "queued") {
+      return {
+        taskId,
+        status: String(taskRow.status) as TaskParseResponse["status"],
+        shouldSchedule: false,
+      };
+    }
+
+    const graphId = String(taskRow.graph_id ?? getDefaultGraphId());
+    const mergedContent = contents.join("\n\n");
+    const contentPreview = truncateText(mergedContent, 200);
+
+    await ensureGraph(connection, graphId);
+    await connection.execute(
+      `
+        UPDATE tasks
+        SET
+          input_text = :inputText,
+          content_preview = :contentPreview,
+          status = 'processing',
+          error_message = NULL,
+          updated_at = CURRENT_TIMESTAMP(3)
+        WHERE id = :taskId
+      `,
+      {
+        taskId,
+        inputText: mergedContent,
+        contentPreview,
+      },
+    );
+
+    await appendTaskEvents(connection, taskId, [
+      {
+        type: "queued",
+        message: "任务内容已接收，已进入 AI 解析队列。",
+        payload: { status: "queued" },
+      },
+      {
+        type: "processing",
+        message: "AI 原始结果正在生成。",
+        payload: { status: "processing" },
+      },
+    ]);
+
+    return {
+      taskId,
+      status: "processing" as const,
+      shouldSchedule: true,
+      graphId,
+      title: String(taskRow.title),
+      sourceType: taskRow.source_type as Task["sourceType"],
+    };
+  });
+
+  if (!scheduled.shouldSchedule) {
+    return {
+      taskId,
+      status: scheduled.status,
+    } satisfies TaskParseResponse;
   }
+
+  void runTaskParseInBackground({
+    taskId,
+    graphId: scheduled.graphId!,
+    title: scheduled.title!,
+    sourceType: scheduled.sourceType!,
+    content: contents,
+  });
+
+  return {
+    taskId,
+    status: scheduled.status,
+  } satisfies TaskParseResponse;
 }
 
 async function applyResultToGraph(
@@ -1118,8 +1262,7 @@ export async function getTaskResult(taskId: string) {
 
 export async function aiParseContent(input: AiParseRequest) {
   const taskId = input.taskId?.trim() || createId("task_preview");
-
-  return buildMockAiParseResponse({
+  return requestAiParseViaHttp({
     taskId,
     title: truncateText(input.content.join("\n\n").trim(), 40) || "AI 解析预览",
     input,

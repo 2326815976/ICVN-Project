@@ -13,6 +13,17 @@ import {
   type ShapeNodeKind,
 } from "./sample-graph";
 
+function buildPreservedEdgeData(edge: AppEdge) {
+  return {
+    isEventEdge: edge.data?.isEventEdge,
+    eventID: edge.data?.eventID,
+    eventOverview: edge.data?.eventOverview,
+    eventDescription: edge.data?.eventDescription,
+    eventName1: edge.data?.eventName1,
+    eventName2: edge.data?.eventName2,
+  };
+}
+
 const GRAPH_LAYOUT_OPTIONS: LayoutOptions = {
   "elk.algorithm": "layered",
   "elk.direction": "RIGHT",
@@ -1780,6 +1791,7 @@ export async function layoutGraphDocument(document: GraphDocument): Promise<Grap
       sourceHandle: buildHandleId("source", sourceSide),
       targetHandle: buildHandleId("target", targetSide),
       data: {
+        ...buildPreservedEdgeData(edge),
         pathStyle: nextPathStyle,
         dashed: edge.data?.dashed ?? false,
         marker: edge.data?.marker ?? "arrow",
@@ -1806,6 +1818,7 @@ export async function layoutGraphDocument(document: GraphDocument): Promise<Grap
       id: edge.id,
       label: typeof edge.label === "string" ? edge.label : "",
       data: {
+        ...buildPreservedEdgeData(edge),
         pathStyle: edge.data?.pathStyle ?? "smoothstep",
         dashed: edge.data?.dashed ?? false,
         marker: edge.data?.marker ?? "arrow",

@@ -1124,6 +1124,14 @@ function announceEdgeLabelSelection(edgeId: string) {
   window.dispatchEvent(new CustomEvent("icvn:select-edge-label", { detail: { edgeId } }));
 }
 
+function announceEdgeSelection(edgeId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent("icvn:select-edge", { detail: { edgeId } }));
+}
+
 function dispatchHistoryGesture(eventName: "icvn:begin-history-gesture" | "icvn:end-history-gesture") {
   if (typeof window === "undefined") {
     return;
@@ -1151,6 +1159,7 @@ export function RelationEdge({
   targetPosition,
 }: EdgeProps<AppEdge>) {
   const edgeData = data as RelationEdgeData;
+  const isEventEdge = edgeData.isEventEdge === true;
   const edgeLabel = typeof label === "string" ? label.trim() : "";
   const { getEdges, getNode, getNodes, getViewport, screenToFlowPosition, setEdges } = useReactFlow<AppNode, AppEdge>();
   const [editing, setEditing] = useState(false);
@@ -1310,10 +1319,34 @@ export function RelationEdge({
     setEdges((currentEdges) =>
       currentEdges.map((edge) =>
         edge.id === id
-          ? {
+          ? createRelationEdge({
               ...edge,
+              id: edge.id,
               label: draft.trim(),
-            }
+              data: {
+                pathStyle: edge.data?.pathStyle ?? "smoothstep",
+                dashed: edge.data?.dashed ?? false,
+                marker: edge.data?.marker ?? "arrow",
+                color: edge.data?.color ?? "#64748b",
+                labelOffset: edge.data?.labelOffset,
+                labelAnchorPosition: edge.data?.labelAnchorPosition,
+                labelPlacementMode: edge.data?.labelPlacementMode,
+                manualRoute: edge.data?.manualRoute,
+                manualRouteMode: edge.data?.manualRouteMode,
+                isEventEdge: edge.data?.isEventEdge,
+                eventID: edge.data?.eventID,
+                eventDescription: edge.data?.eventDescription,
+                eventName1: edge.data?.eventName1,
+                eventName2: edge.data?.eventName2,
+                ...(edge.data?.isEventEdge
+                  ? {
+                      eventOverview: draft.trim(),
+                    }
+                  : {
+                      eventOverview: edge.data?.eventOverview,
+                    }),
+              },
+            })
           : edge,
       ),
     );
@@ -1321,6 +1354,11 @@ export function RelationEdge({
   };
 
   const handleSelectLabel = () => {
+    if (isEventEdge) {
+      announceEdgeSelection(id);
+      return;
+    }
+
     announceEdgeLabelSelection(id);
   };
 
@@ -1362,6 +1400,12 @@ export function RelationEdge({
                 labelPlacementMode: "manual",
                 manualRoute: edge.data?.manualRoute,
                 manualRouteMode: edge.data?.manualRouteMode,
+                isEventEdge: edge.data?.isEventEdge,
+                eventID: edge.data?.eventID,
+                eventOverview: edge.data?.eventOverview,
+                eventDescription: edge.data?.eventDescription,
+                eventName1: edge.data?.eventName1,
+                eventName2: edge.data?.eventName2,
               },
             })
           : edge,
@@ -1390,6 +1434,12 @@ export function RelationEdge({
                 labelPlacementMode: edge.data?.labelPlacementMode,
                 manualRoute: manualRoute?.map(roundPoint),
                 manualRouteMode,
+                isEventEdge: edge.data?.isEventEdge,
+                eventID: edge.data?.eventID,
+                eventOverview: edge.data?.eventOverview,
+                eventDescription: edge.data?.eventDescription,
+                eventName1: edge.data?.eventName1,
+                eventName2: edge.data?.eventName2,
               },
             })
           : edge,
@@ -1588,7 +1638,7 @@ export function RelationEdge({
                 <input
                   ref={inputRef}
                   value={draft}
-                  placeholder="输入连线说明"
+                  placeholder={isEventEdge ? "输入事件概述" : "输入连线说明"}
                   className="nodrag nopan pointer-events-auto w-44 rounded-md border border-sky-300 bg-white px-2.5 py-1 text-center text-xs leading-5 text-slate-700 outline-none ring-2 ring-sky-100"
                   onPointerDown={(event) => event.stopPropagation()}
                   onClick={(event) => event.stopPropagation()}
@@ -1613,13 +1663,23 @@ export function RelationEdge({
                 <div className="nodrag nopan pointer-events-auto w-fit max-w-[280px]">
                   <button
                     type="button"
-                    aria-label={edgeLabel ? `编辑并沿线拖动说明：${edgeLabel}` : "双击编辑说明，沿线拖动可调整位置"}
+                    aria-label={
+                      edgeLabel
+                        ? `编辑并沿线拖动说明：${edgeLabel}`
+                        : isEventEdge
+                          ? "双击编辑事件概述，沿线拖动可调整位置"
+                          : "双击编辑说明，沿线拖动可调整位置"
+                    }
                     className={cn(
-                      "max-w-[280px] cursor-grab rounded-md bg-white px-2.5 py-1 text-center text-xs font-medium leading-5 transition active:cursor-grabbing",
+                      "max-w-[280px] cursor-grab rounded-md px-2.5 py-1 text-center text-xs font-medium leading-5 transition active:cursor-grabbing",
                       edgeLabel ? "w-max" : "min-w-[112px]",
                       selected || isLabelSelected
-                        ? "text-sky-700 outline outline-1 outline-sky-300"
-                        : "text-slate-600 hover:text-slate-700",
+                        ? isEventEdge
+                          ? "bg-white text-slate-900 outline outline-1 outline-slate-300"
+                          : "bg-white text-sky-700 outline outline-1 outline-sky-300"
+                        : isEventEdge
+                          ? "bg-white text-slate-700 outline outline-1 outline-slate-200 hover:text-slate-900"
+                          : "bg-white text-slate-600 hover:text-slate-700",
                     )}
                     onPointerDown={handleLabelAnchorPointerDown}
                     onClick={(event) => {
@@ -1633,7 +1693,7 @@ export function RelationEdge({
                     }}
                   >
                     <span className={cn("block whitespace-pre-wrap break-words text-center leading-5", !edgeLabel && "text-slate-400")}>
-                      {edgeLabel || "双击编辑，沿线拖动"}
+                      {edgeLabel || (isEventEdge ? "双击编辑事件概述" : "双击编辑，沿线拖动")}
                     </span>
                   </button>
                 </div>

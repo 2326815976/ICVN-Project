@@ -19,6 +19,9 @@ import {
   type GraphDocument,
   type ShapeNodeKind,
 } from "./graph/sample-graph";
+import * as mammoth from "mammoth";
+
+const EVENT_EDGE_COLOR = "#0f766e";
 
 function getSafeViewport(document: Partial<GraphDocument>) {
   return document.viewport &&
@@ -138,6 +141,164 @@ function appendDisplayLine(lines: string[], label: string, value: unknown) {
   lines.push(`${label}：${text}`);
 }
 
+function normalizeLookupKey(value: unknown) {
+  const text = asDisplayText(value);
+  return text ? text.toLocaleLowerCase() : "";
+}
+
+function isConvertibleBackendEventNode(node: { [key: string]: unknown }) {
+  if (node.type !== "event") {
+    return false;
+  }
+
+  const properties = getObjectRecord(node.properties);
+  return Boolean(
+    asDisplayText(properties.eventID) ||
+      asDisplayText(properties.name1) ||
+      asDisplayText(properties.name2) ||
+      asDisplayText(properties.eventOverview) ||
+      asDisplayText(properties.eventDescription),
+  );
+}
+
+function buildNodeLookupKeys(node: { [key: string]: unknown }) {
+  const properties = getObjectRecord(node.properties);
+
+  return [
+    normalizeLookupKey(node.label),
+    normalizeLookupKey(properties.name),
+    normalizeLookupKey(properties.id),
+  ].filter(Boolean);
+}
+
+function buildConvertedEventEdgeId(eventNode: { [key: string]: unknown }, index: number) {
+  const nodeId = typeof eventNode.id === "string" ? eventNode.id.trim() : "";
+  const properties = getObjectRecord(eventNode.properties);
+  const eventID = asDisplayText(properties.eventID);
+
+  if (nodeId) {
+    return `event_edge_${nodeId}`;
+  }
+
+  if (eventID) {
+    return `event_edge_${eventID}_${index + 1}`;
+  }
+
+  return `event_edge_${index + 1}`;
+}
+
+function convertEventNodesToEventEdges(input: {
+  nodes: Array<{ [key: string]: unknown }>;
+  edges: Array<{ [key: string]: unknown }>;
+  events?: Array<{ [key: string]: unknown }>;
+}) {
+  const payloadEvents = Array.isArray(input.events) ? input.events : [];
+  const embeddedEventNodes = input.nodes.filter(isConvertibleBackendEventNode);
+  const embeddedEventNodeIds = new Set(
+    embeddedEventNodes.map((node) => (typeof node.id === "string" ? node.id : "")).filter(Boolean),
+  );
+  const eventCandidates = [...embeddedEventNodes, ...payloadEvents];
+  const baseNodes = input.nodes.filter((node) => !embeddedEventNodeIds.has(typeof node.id === "string" ? node.id : ""));
+  const personIdByKey = new Map<string, string>();
+
+  for (const node of baseNodes) {
+    const nodeId = typeof node.id === "string" ? node.id : "";
+    if (!nodeId) {
+      continue;
+    }
+
+    for (const key of buildNodeLookupKeys(node)) {
+      if (!personIdByKey.has(key)) {
+        personIdByKey.set(key, nodeId);
+      }
+    }
+  }
+
+  const convertedEdgeIds = new Set<string>();
+  const convertedEdges: Array<{ [key: string]: unknown }> = [];
+  const fallbackEventNodes: Array<{ [key: string]: unknown }> = [];
+  const consumedEventNodeIds = new Set<string>();
+
+  eventCandidates.forEach((eventNode, index) => {
+    const properties = getObjectRecord(eventNode.properties);
+    const eventID = asDisplayText(properties.eventID);
+    const name1 = asDisplayText(properties.name1);
+    const name2 = asDisplayText(properties.name2);
+    const eventOverview =
+      asDisplayText(properties.eventOverview) ||
+      (typeof eventNode.label === "string" ? eventNode.label.trim() : "");
+    const eventDescription = asDisplayText(properties.eventDescription);
+    const sourceId = personIdByKey.get(normalizeLookupKey(name1));
+    const targetId = personIdByKey.get(normalizeLookupKey(name2));
+    const originalNodeId = typeof eventNode.id === "string" ? eventNode.id : "";
+
+    if (!name1 || !name2 || !sourceId || !targetId) {
+      fallbackEventNodes.push(eventNode);
+      return;
+    }
+
+    if (originalNodeId) {
+      consumedEventNodeIds.add(originalNodeId);
+    }
+
+    let edgeId = buildConvertedEventEdgeId(eventNode, index);
+    while (convertedEdgeIds.has(edgeId)) {
+      edgeId = `${edgeId}_${convertedEdgeIds.size + 1}`;
+    }
+    convertedEdgeIds.add(edgeId);
+
+    convertedEdges.push({
+      id: edgeId,
+      source: sourceId,
+      target: targetId,
+      label: eventOverview || eventDescription || eventID || "事件",
+      relation: "event",
+      data: {
+        pathStyle: "smoothstep",
+        dashed: false,
+        marker: "none",
+        color: EVENT_EDGE_COLOR,
+        isEventEdge: true,
+        eventID,
+        eventOverview,
+        eventDescription,
+        eventName1: name1,
+        eventName2: name2,
+      },
+      properties: {
+        isEventEdge: true,
+        eventID,
+        eventOverview,
+        eventDescription,
+        name1,
+        name2,
+      },
+    });
+  });
+
+  const remainingEdges = input.edges.filter((edge) => {
+    const sourceId =
+      typeof edge.source === "string"
+        ? edge.source
+        : typeof edge.sourceId === "string"
+          ? edge.sourceId
+          : "";
+    const targetId =
+      typeof edge.target === "string"
+        ? edge.target
+        : typeof edge.targetId === "string"
+          ? edge.targetId
+          : "";
+
+    return !consumedEventNodeIds.has(sourceId) && !consumedEventNodeIds.has(targetId);
+  });
+
+  return {
+    nodes: [...baseNodes, ...fallbackEventNodes],
+    edges: [...remainingEdges, ...convertedEdges],
+  };
+}
+
 function buildBackendNodeText(node: { [key: string]: unknown }, data: Record<string, unknown>) {
   const properties = getObjectRecord(node.properties);
   const label =
@@ -149,7 +310,6 @@ function buildBackendNodeText(node: { [key: string]: unknown }, data: Record<str
   const lines: string[] = [label];
 
   if (node.type === "person") {
-    appendDisplayLine(lines, "ID", properties.id);
     appendDisplayLine(lines, "性别", properties.sex);
     appendDisplayLine(lines, "生日", properties.birthday);
     appendDisplayLine(lines, "证件号", properties.IDnumber);
@@ -216,8 +376,9 @@ function resolveGraphPayload(parsed: unknown) {
     if (nodes.length > 0 || edges.length > 0 || events.length > 0) {
       return {
         ...payload,
-        nodes: [...nodes, ...events],
+        nodes,
         edges,
+        events,
       };
     }
 
@@ -225,7 +386,7 @@ function resolveGraphPayload(parsed: unknown) {
   };
 
   if (Array.isArray(root.nodes) && Array.isArray(root.edges)) {
-    return root;
+    return mergeTaskResultPayload(root) ?? root;
   }
 
   const data = getObjectRecord(root.data);
@@ -377,6 +538,18 @@ function normalizeEdge(edge: { [key: string]: unknown }, index: number): AppEdge
         color: typeof data.color === "string" ? data.color : undefined,
         labelOffset: isEdgeLabelOffset(data.labelOffset) ? data.labelOffset : undefined,
         labelAnchorPosition: isEdgeLabelAnchorPosition(data.labelAnchorPosition) ? data.labelAnchorPosition : undefined,
+        isEventEdge:
+          typeof data.isEventEdge === "boolean"
+            ? data.isEventEdge
+            : typeof properties.isEventEdge === "boolean"
+              ? properties.isEventEdge
+              : undefined,
+        eventID: asDisplayText(data.eventID) || asDisplayText(properties.eventID) || undefined,
+        eventOverview: asDisplayText(data.eventOverview) || asDisplayText(properties.eventOverview) || undefined,
+        eventDescription:
+          asDisplayText(data.eventDescription) || asDisplayText(properties.eventDescription) || undefined,
+        eventName1: asDisplayText(data.eventName1) || asDisplayText(properties.name1) || undefined,
+        eventName2: asDisplayText(data.eventName2) || asDisplayText(properties.name2) || undefined,
         manualRoute: isEdgeRoutePoints(data.manualRoute) ? data.manualRoute : undefined,
         manualRouteMode: isEdgeRouteMode(data.manualRouteMode) ? data.manualRouteMode : undefined,
       },
@@ -443,7 +616,13 @@ export function parseGraphDocument(text: string): GraphDocument {
     throw new Error("导入格式无效，需要包含 nodes 和 edges 数组。");
   }
 
-  const mergedNodes = [...payload.nodes, ...(Array.isArray(payload.events) ? payload.events : [])].filter(
+  const convertedGraph = convertEventNodesToEventEdges({
+    nodes: payload.nodes,
+    edges: payload.edges,
+    events: Array.isArray(payload.events) ? payload.events : undefined,
+  });
+
+  const mergedNodes = convertedGraph.nodes.filter(
     (node, index, array) => {
       const nodeId = typeof node.id === "string" ? node.id : "";
       if (!nodeId) {
@@ -456,7 +635,7 @@ export function parseGraphDocument(text: string): GraphDocument {
 
   return {
     nodes: mergedNodes.map(normalizeNode).filter((node) => node.type !== "lineNode"),
-    edges: payload.edges.map(normalizeEdge),
+    edges: convertedGraph.edges.map(normalizeEdge),
     viewport: getSafeViewport("viewport" in payload ? payload : parsed),
   };
 }
@@ -504,16 +683,44 @@ function normalizeExtractedText(value: string) {
     .trim();
 }
 
-function extractLegacyWordText(raw: string) {
-  const matches = raw.match(/[\u4e00-\u9fa5A-Za-z0-9，。；：“”‘’！？、（）()《》【】—…\-_\n\r\t ]{2,}/g) ?? [];
-  return normalizeExtractedText(matches.join("\n"));
+async function extractLegacyWordTextViaServer(file: File) {
+  type ExtractDocumentResponse = {
+    success?: boolean;
+    data?: { text?: string };
+    error?: { message?: string };
+  };
+
+  const contentBase64 = await readFileAsBase64(file);
+  const response = await fetch("/api/documents/extract", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      fileName: file.name,
+      contentBase64,
+    }),
+  });
+
+  let payload: ExtractDocumentResponse | null = null;
+
+  try {
+    payload = (await response.json()) as ExtractDocumentResponse;
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok || !payload?.success || !payload.data?.text) {
+    throw new Error(payload?.error?.message ?? "暂时无法从该 .doc 文件中提取文本，请稍后重试。");
+  }
+
+  return normalizeExtractedText(payload.data.text);
 }
 
 export async function extractTextFromDocument(file: File) {
   const fileName = file.name.toLowerCase();
 
   if (fileName.endsWith(".docx")) {
-    const mammoth = await import("mammoth");
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({ arrayBuffer });
 
@@ -521,20 +728,7 @@ export async function extractTextFromDocument(file: File) {
   }
 
   if (fileName.endsWith(".doc")) {
-    const arrayBuffer = await file.arrayBuffer();
-    const utf8Text = new TextDecoder("utf-8", { fatal: false }).decode(arrayBuffer);
-    const extractedUtf8 = extractLegacyWordText(utf8Text);
-    if (extractedUtf8) {
-      return extractedUtf8;
-    }
-
-    const gbText = new TextDecoder("gb18030", { fatal: false }).decode(arrayBuffer);
-    const extractedGb = extractLegacyWordText(gbText);
-    if (extractedGb) {
-      return extractedGb;
-    }
-
-    throw new Error("暂时无法从该 .doc 文件中提取文本，请优先转换为 .docx 或 .txt 后重试。");
+    return extractLegacyWordTextViaServer(file);
   }
 
   return normalizeExtractedText(await file.text());
