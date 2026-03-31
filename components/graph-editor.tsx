@@ -325,12 +325,32 @@ export function GraphEditor() {
       return createWorkspaceFile({
         id: baseFile?.id ?? activeFileIdRef.current,
         name: options?.name ?? currentFileNameRef.current,
+        taskId: baseFile?.taskId,
         document,
         createdAt: baseFile?.createdAt ?? now,
         updatedAt: now,
       });
     },
     [],
+  );
+
+  const bindTaskToWorkspaceFile = useCallback(
+    (fileId: string, taskId: string) => {
+      const currentFiles = workspaceFilesRef.current;
+      const targetFile = currentFiles.find((file) => file.id === fileId);
+      if (!targetFile) {
+        return;
+      }
+
+      const nextFile = createWorkspaceFile({
+        ...targetFile,
+        taskId,
+      });
+      const nextFiles = replaceWorkspaceFile(currentFiles, nextFile);
+      updateWorkspaceState(nextFiles, activeFileIdRef.current);
+      writeWorkspaceToStorage(nextFiles, activeFileIdRef.current);
+    },
+    [updateWorkspaceState, writeWorkspaceToStorage],
   );
 
   const syncCurrentFileSnapshot = useCallback(
@@ -475,12 +495,12 @@ export function GraphEditor() {
         setTasks(response.items);
         setTaskListError(null);
         setSelectedTaskId((current) => {
-          if (options?.highlightTaskId && response.items.some((task) => task.id === options.highlightTaskId)) {
-            return options.highlightTaskId;
-          }
-
           if (current && response.items.some((task) => task.id === current)) {
             return current;
+          }
+
+          if (options?.highlightTaskId && response.items.some((task) => task.id === options.highlightTaskId)) {
+            return options.highlightTaskId;
           }
 
           return response.items[0]?.id ?? null;
@@ -1326,6 +1346,7 @@ export function GraphEditor() {
           title: nextFile.name,
         });
 
+        bindTaskToWorkspaceFile(nextFile.id, task.id);
         setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
         setSelectedTaskId(task.id);
         void loadTaskList({ highlightTaskId: task.id, silent: true });
@@ -1338,7 +1359,7 @@ export function GraphEditor() {
         );
       }
     },
-    [createWorkspaceCanvas, loadTaskList],
+    [bindTaskToWorkspaceFile, createWorkspaceCanvas, loadTaskList],
   );
 
   const handleCreateFile = useCallback(async () => {
@@ -1762,22 +1783,37 @@ export function GraphEditor() {
     async (taskId: string) => {
       setSelectedTaskId(taskId);
 
-      const targetTask = tasks.find((task) => task.id === taskId) ?? null;
-      if (targetTask?.status === "failed") {
-        setStatus(targetTask.errorMessage || `任务《${targetTask.title}》执行失败，暂无可加载结果。`);
-        return;
-      }
-
-      if (targetTask && !["validated", "applied"].includes(targetTask.status)) {
-        setStatus(`任务《${targetTask.title}》当前状态为 ${targetTask.status}，结果暂不可加载。`);
-        void loadTaskList({ highlightTaskId: taskId, silent: true });
-        return;
-      }
-
       try {
+        const detail = await openApiClient.getTaskDetail(taskId);
+        const targetTask = detail ?? tasks.find((task) => task.id === taskId) ?? null;
+        const localWorkspaceFile =
+          workspaceFilesRef.current.find((file) => file.taskId === taskId) ??
+          workspaceFilesRef.current.find((file) => file.name === targetTask?.title);
+
+        if (targetTask?.status === "failed") {
+          setStatus(targetTask.errorMessage || `任务《${targetTask.title}》执行失败，暂无可加载结果。`);
+          void loadTaskList({ highlightTaskId: taskId, silent: true });
+          return;
+        }
+
+        if (targetTask && !["validated", "applied"].includes(targetTask.status)) {
+          if (localWorkspaceFile) {
+            updateWorkspaceState(workspaceFilesRef.current, localWorkspaceFile.id);
+            setRenameDraft(localWorkspaceFile.name);
+            applyDocument(localWorkspaceFile.document, `已切换到任务《${targetTask.title}》的本地画布。`, {
+              resetHistory: true,
+            });
+          } else {
+            setStatus(`任务《${targetTask.title}》当前还没有可加载结果。`);
+          }
+          void loadTaskList({ highlightTaskId: taskId, silent: true });
+          return;
+        }
+
         const result = await openApiClient.getTaskResult(taskId);
         if (!result.result?.nodes || !result.result?.edges) {
           setStatus("任务结果为空，暂时无法加载到画布。");
+          void loadTaskList({ highlightTaskId: taskId, silent: true });
           return;
         }
 
@@ -1795,11 +1831,32 @@ export function GraphEditor() {
         void loadTaskList({ highlightTaskId: taskId, silent: true });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "任务结果加载失败，请稍后重试。";
-        setStatus(message);
+        if (message.includes("Task result is not ready")) {
+          const targetTask = tasks.find((task) => task.id === taskId) ?? null;
+          const localWorkspaceFile =
+            workspaceFilesRef.current.find((file) => file.taskId === taskId) ??
+            workspaceFilesRef.current.find((file) => file.name === targetTask?.title);
+
+          if (localWorkspaceFile) {
+            updateWorkspaceState(workspaceFilesRef.current, localWorkspaceFile.id);
+            setRenameDraft(localWorkspaceFile.name);
+            applyDocument(localWorkspaceFile.document, `已切换到任务《${targetTask?.title ?? taskId}》的本地画布。`, {
+              resetHistory: true,
+            });
+          } else {
+            setStatus(
+              targetTask
+                ? `任务《${targetTask.title}》当前还没有可加载结果。`
+                : "当前任务结果还没有准备好。",
+            );
+          }
+        } else {
+          setStatus(message);
+        }
         void loadTaskList({ highlightTaskId: taskId, silent: true });
       }
     },
-    [loadTaskList, runAutoLayout, tasks],
+    [applyDocument, loadTaskList, runAutoLayout, tasks, updateWorkspaceState],
   );
 
   const handleDeleteTask = useCallback(
@@ -1851,6 +1908,10 @@ export function GraphEditor() {
     setIsDocumentImportDialogOpen(false);
     setIsImportDialogOpen(true);
   }, [isDocumentProcessing]);
+
+  const handleOpenJsonImportDialog = useCallback(() => {
+    setIsImportDialogOpen(true);
+  }, []);
 
   const handleImport = useCallback(async () => {
     try {
@@ -2815,6 +2876,16 @@ export function GraphEditor() {
               </div>
             ) : null}
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            className={toolbarButtonClassName}
+            onClick={handleOpenJsonImportDialog}
+            disabled={isImportingLayout}
+          >
+            <FileJson className="size-4" />
+            {"JSON 导入"}
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -3963,7 +4034,7 @@ export function GraphEditor() {
                 <div>
                   <h2 className="text-lg font-semibold text-slate-900">导入 JSON</h2>
                   <p className="mt-1 text-sm leading-6 text-slate-500">
-                    粘贴后端返回结果或关系图 JSON，确认后自动导入并整理布局。
+                    粘贴 `Last_output.json` 这类 AI 返回结果，或直接粘贴关系图 JSON，确认后自动导入并整理布局。
                   </p>
                 </div>
                 <Button

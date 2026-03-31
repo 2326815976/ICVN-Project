@@ -220,68 +220,90 @@ export function useDocumentImportFlow({
 
     try {
       for (const item of queue) {
-        let createdTaskId: string | null = null;
-
         updateDocumentImportItem(item.id, {
           status: "uploading",
           progress: 12,
-          message: "正在创建后端任务...",
+          message: "正在提取文档文本...",
         });
+      }
 
-        try {
+      try {
+        const extractedContents: string[] = [];
+
+        for (const item of queue) {
+          updateDocumentImportItem(item.id, {
+            status: "uploading",
+            progress: 20,
+            message: "正在提取文档文本...",
+          });
+
           const parsedText = await extractTextFromDocument(item.file);
           if (!parsedText) {
-            throw new Error("文档未提取到可解析文本，请检查文件内容后重试。");
+            throw new Error(`${item.name} 未提取到可解析文本，请检查文件内容后重试。`);
           }
 
-          const task = await openApiClient.createDocumentTask({
-            sourceType: "document",
-            title: item.name,
-            files: [
-              {
-                fileName: item.name,
-                mimeType: item.type || "application/octet-stream",
-                size: item.size,
-              },
-            ],
+          extractedContents.push(parsedText);
+          try {
+          updateDocumentImportItem(item.id, {
+            status: "processing",
+            progress: 35,
+            message: "文本提取完成，等待整批提交...",
           });
-          createdTaskId = task.id;
-          onTaskChange?.(task.id);
+          } catch {
+            // no-op, next loop handles batch submission
+          }
+        }
 
+        const task = await openApiClient.createDocumentTask({
+          sourceType: "document",
+          title: queue.length === 1 ? queue[0].name : `${queue[0].name} 等 ${queue.length} 份文档`,
+          files: queue.map((item) => ({
+            fileName: item.name,
+            mimeType: item.type || "application/octet-stream",
+            size: item.size,
+          })),
+        });
+        onTaskChange?.(task.id);
+
+        for (const item of queue) {
           updateDocumentImportItem(item.id, {
             status: "processing",
             progress: 45,
-            message: `任务已创建（${task.id}），正在提交解析文本...`,
+            message: `任务已创建（${task.id}），正在整批提交解析文本...`,
           });
-          await openApiClient.parseTaskContent(task.id, { content: [parsedText] });
-          const processed = await processTaskToCanvas(task.id, (payload) => {
+        }
+
+        await openApiClient.parseTaskContent(task.id, { content: extractedContents });
+        const processed = await processTaskToCanvas(task.id, (payload) => {
+          for (const item of queue) {
             updateDocumentImportItem(item.id, {
               status: payload.status,
               progress: payload.progress,
               message: payload.message,
             });
-          });
+          }
+        });
 
+        for (const item of queue) {
           updateDocumentImportItem(item.id, {
             status: "completed",
             progress: 100,
             message: processed.status === "applied" ? "处理完成，后端已自动应用任务结果。" : "处理完成。",
           });
-          onTaskChange?.(task.id);
-        } catch (error: unknown) {
+        }
+
+        onTaskChange?.(task.id);
+        setStatus("文档处理队列已完成，已整批提交到任务接口。");
+      } catch (error: unknown) {
+        for (const item of queue) {
           updateDocumentImportItem(item.id, {
             status: "failed",
             progress: 0,
             message: error instanceof Error ? error.message : "处理失败，请稍后重试。",
           });
-
-          if (createdTaskId) {
-            onTaskChange?.(createdTaskId);
-          }
         }
+        throw error;
       }
-
-      setStatus("文档处理队列已完成，已对接任务接口。");
     } finally {
       setIsDocumentProcessing(false);
     }

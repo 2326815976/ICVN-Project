@@ -104,6 +104,7 @@ export type WindowWithSaveFilePicker = Window &
 export type GraphWorkspaceFile = {
   id: string;
   name: string;
+  taskId?: string;
   document: GraphDocument;
   createdAt: string;
   updatedAt: string;
@@ -149,6 +150,7 @@ export function createEmptyGraphDocument(): GraphDocument {
 export function createWorkspaceFile(options?: {
   id?: string;
   name?: string;
+  taskId?: string;
   document?: GraphDocument;
   createdAt?: string;
   updatedAt?: string;
@@ -158,6 +160,7 @@ export function createWorkspaceFile(options?: {
   return {
     id: options?.id ?? createGraphFileId(),
     name: normalizeGraphFileName(options?.name),
+    taskId: typeof options?.taskId === "string" && options.taskId.trim() ? options.taskId.trim() : undefined,
     document: structuredClone(options?.document ?? createEmptyGraphDocument()),
     createdAt: options?.createdAt ?? now,
     updatedAt: options?.updatedAt ?? now,
@@ -277,7 +280,7 @@ export function parseWorkspaceStorage(text: string): GraphWorkspace | null {
     }
 
     const files = parsed.files
-      .map((item, index) => {
+      .map<GraphWorkspaceFile | null>((item, index) => {
         const record = getObjectRecord(item);
         const documentSource = record.document;
 
@@ -289,6 +292,7 @@ export function parseWorkspaceStorage(text: string): GraphWorkspace | null {
               typeof record.name === "string"
                 ? record.name
                 : `${EMPTY_FILE_NAME_PREFIX} ${index + 1}`,
+            taskId: typeof record.taskId === "string" ? record.taskId : undefined,
             document,
             createdAt: typeof record.createdAt === "string" ? record.createdAt : undefined,
             updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : undefined,

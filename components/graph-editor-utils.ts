@@ -404,7 +404,121 @@ function resolveGraphPayload(parsed: unknown) {
     return mergeTaskResultPayload(rootResult) ?? rootResult;
   }
 
-  throw new Error("导入格式无效，需要包含 nodes 和 edges，或使用后端 /graph/view、/tasks/{taskId}/result 返回结构。");
+  const toText = (value: unknown) => asDisplayText(value);
+  const normalizeKey = (value: unknown) => toText(value).toLocaleLowerCase();
+  const looksLikeRawAiResult = (payload: Record<string, unknown>) =>
+    Array.isArray(payload.interrogatedPerson) || Array.isArray(payload.eventPerson) || Array.isArray(payload.events);
+  const convertRawAiResultToGraphPayload = (payload: Record<string, unknown>) => {
+    const interrogatedPerson = Array.isArray(payload.interrogatedPerson) ? payload.interrogatedPerson : [];
+    const eventPerson = Array.isArray(payload.eventPerson) ? payload.eventPerson : [];
+    const events = Array.isArray(payload.events) ? payload.events : [];
+
+    if (interrogatedPerson.length === 0 && eventPerson.length === 0 && events.length === 0) {
+      return null;
+    }
+
+    const nodes: Array<{ [key: string]: unknown }> = [];
+    const personIdByKey = new Map<string, string>();
+
+    const ensurePersonNode = (
+      person: Record<string, unknown>,
+      options?: {
+        preferredId?: string;
+        fallbackName?: string;
+        sourceRole?: string;
+      },
+    ) => {
+      const name = toText(person.name) || options?.fallbackName || "";
+      const preferredId = toText(options?.preferredId) || toText(person.id);
+      const lookupKeys = [normalizeKey(name), normalizeKey(preferredId)].filter(Boolean);
+      const existingId = lookupKeys.map((key) => personIdByKey.get(key)).find(Boolean);
+
+      if (existingId) {
+        return existingId;
+      }
+
+      const nodeId = preferredId || `person_${nodes.length + 1}`;
+      const properties: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(person)) {
+        const text = toText(value);
+        if (text) {
+          properties[key] = text;
+        }
+      }
+
+      nodes.push({
+        id: nodeId,
+        type: "person",
+        label: name || nodeId,
+        properties: {
+          sourceRole: options?.sourceRole ?? "person",
+          ...properties,
+        },
+      });
+
+      for (const key of lookupKeys) {
+        personIdByKey.set(key, nodeId);
+      }
+
+      return nodeId;
+    };
+
+    for (const item of interrogatedPerson) {
+      ensurePersonNode(getObjectRecord(item), {
+        sourceRole: "interrogatedPerson",
+      });
+    }
+
+    for (const item of eventPerson) {
+      const record = getObjectRecord(item);
+      ensurePersonNode(record, {
+        fallbackName: toText(record.name),
+        sourceRole: "eventPerson",
+      });
+    }
+
+    return {
+      nodes,
+      edges: [] as Array<{ [key: string]: unknown }>,
+      events: events.map((item, index) => {
+        const record = getObjectRecord(item);
+        ensurePersonNode({}, { fallbackName: toText(record.name1), sourceRole: "eventParticipant" });
+        ensurePersonNode({}, { fallbackName: toText(record.name2), sourceRole: "eventParticipant" });
+
+        return {
+          id: `raw_event_${toText(record.eventID) || index + 1}`,
+          type: "event",
+          label: toText(record.eventOverview) || toText(record.eventDescription) || `事件 ${index + 1}`,
+          properties: {
+            eventID: toText(record.eventID),
+            eventOverview: toText(record.eventOverview),
+            eventDescription: toText(record.eventDescription),
+            name1: toText(record.name1),
+            name2: toText(record.name2),
+          },
+        };
+      }),
+    };
+  };
+
+  if (looksLikeRawAiResult(rootResult)) {
+    return convertRawAiResultToGraphPayload(rootResult);
+  }
+
+  const wrappedRawResult = getObjectRecord(data.result);
+  if (looksLikeRawAiResult(wrappedRawResult)) {
+    return convertRawAiResultToGraphPayload(wrappedRawResult);
+  }
+
+  if (looksLikeRawAiResult(data)) {
+    return convertRawAiResultToGraphPayload(data);
+  }
+
+  if (looksLikeRawAiResult(root)) {
+    return convertRawAiResultToGraphPayload(root);
+  }
+
+  throw new Error("导入格式无效，需要包含 nodes 和 edges，或使用任务结果结构、AI 原始返回结构。");
 }
 
 function normalizeNode(node: { [key: string]: unknown }, index: number): AppNode {
