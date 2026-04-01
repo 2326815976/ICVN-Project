@@ -20,7 +20,6 @@ import {
   type ShapeNodeKind,
 } from "./graph/sample-graph";
 import type { AiParseResult, GraphEdge as TaskGraphEdge, GraphNode as TaskGraphNode, JsonValue } from "@/lib/domain/models";
-import * as mammoth from "mammoth";
 
 const EVENT_EDGE_COLOR = "#0f766e";
 
@@ -1090,7 +1089,7 @@ function normalizeExtractedText(value: string) {
     .trim();
 }
 
-async function extractLegacyWordTextViaServer(file: File) {
+async function extractWordTextViaServer(file: File) {
   type ExtractDocumentResponse = {
     success?: boolean;
     data?: { text?: string };
@@ -1118,7 +1117,7 @@ async function extractLegacyWordTextViaServer(file: File) {
   }
 
   if (!response.ok || !payload?.success || !payload.data?.text) {
-    throw new Error(payload?.error?.message ?? "暂时无法从该 .doc 文件中提取文本，请稍后重试。");
+    throw new Error(payload?.error?.message ?? "暂时无法从该 Word 文件中提取文本，请稍后重试。");
   }
 
   return normalizeExtractedText(payload.data.text);
@@ -1127,19 +1126,13 @@ async function extractLegacyWordTextViaServer(file: File) {
 export async function extractTextFromDocument(file: File) {
   const fileName = file.name.toLowerCase();
 
-  if (fileName.endsWith(".docx")) {
-    const arrayBuffer = await file.arrayBuffer();
-    const result = await mammoth.extractRawText({ arrayBuffer });
-
-    return normalizeExtractedText(result.value);
-  }
-
-  if (fileName.endsWith(".doc")) {
-    return extractLegacyWordTextViaServer(file);
+  if (fileName.endsWith(".doc") || fileName.endsWith(".docx")) {
+    return extractWordTextViaServer(file);
   }
 
   return normalizeExtractedText(await file.text());
 }
+
 
 export function isEditableTarget(target: EventTarget | null) {
   return target instanceof HTMLElement

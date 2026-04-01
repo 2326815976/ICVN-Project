@@ -765,6 +765,76 @@ export function GraphEditor() {
     return true;
   }, [updateWorkspaceState, writeWorkspaceToStorage]);
 
+  const reconcileWorkspaceFilesWithTasks = useCallback(
+    (taskItems: Task[]) => {
+      if (taskItems.length === 0) {
+        return false;
+      }
+
+      const taskIds = new Set(taskItems.map((task) => task.id));
+      let nextFiles = workspaceFilesRef.current.filter((file) => !file.taskId || taskIds.has(file.taskId));
+      let didChange = nextFiles.length !== workspaceFilesRef.current.length;
+
+      for (const task of taskItems) {
+        const normalizedTitle = normalizeGraphFileName(task.title);
+        const matchedFile =
+          nextFiles.find((file) => file.taskId === task.id) ??
+          nextFiles.find((file) => !file.taskId && file.name === task.title) ??
+          nextFiles.find((file) => isReusableDefaultWorkspaceFile(file)) ??
+          null;
+
+        if (matchedFile) {
+          const needsBinding = matchedFile.taskId !== task.id;
+          const needsRename = matchedFile.name !== normalizedTitle;
+
+          if (!needsBinding && !needsRename) {
+            continue;
+          }
+
+          const reboundFile = createWorkspaceFile({
+            ...matchedFile,
+            name: normalizedTitle,
+            taskId: task.id,
+          });
+          nextFiles = replaceWorkspaceFile(nextFiles, reboundFile);
+          didChange = true;
+          continue;
+        }
+
+        nextFiles = [
+          ...nextFiles,
+          createWorkspaceFile({
+            name: task.title,
+            taskId: task.id,
+            document: createEmptyGraphDocument(),
+          }),
+        ];
+        didChange = true;
+      }
+
+      if (!didChange || nextFiles.length === 0) {
+        return false;
+      }
+
+      const nextActiveFile =
+        nextFiles.find((file) => file.id === activeFileIdRef.current) ??
+        nextFiles.find((file) => file.taskId === selectedTaskId) ??
+        nextFiles[0] ??
+        null;
+
+      if (!nextActiveFile) {
+        return false;
+      }
+
+      updateWorkspaceState(nextFiles, nextActiveFile.id);
+      setRenameDraft(nextActiveFile.name);
+      setRenamingFileId(null);
+      writeWorkspaceToStorage(nextFiles, nextActiveFile.id);
+      return true;
+    },
+    [selectedTaskId, updateWorkspaceState, writeWorkspaceToStorage],
+  );
+
   const ensureWorkspaceFileForTask = useCallback(
     (task: Task, options?: { switchToFile?: boolean }) => {
       const existingWorkspaceFile =
@@ -823,6 +893,15 @@ export function GraphEditor() {
   useEffect(() => {
     ensureWorkspaceFileForTaskRef.current = ensureWorkspaceFileForTask;
   }, [ensureWorkspaceFileForTask]);
+
+  useEffect(() => {
+    if (tasks.length === 0) {
+      return;
+    }
+
+    pruneRedundantDefaultWorkspaceFiles();
+    reconcileWorkspaceFilesWithTasks(tasks);
+  }, [pruneRedundantDefaultWorkspaceFiles, reconcileWorkspaceFilesWithTasks, tasks]);
 
   const serializeScene = useCallback(
     () =>
@@ -3967,7 +4046,7 @@ export function GraphEditor() {
       </header>
 
       {status ? (
-        <div className="pointer-events-none fixed right-6 top-6 z-[140] w-fit max-w-[calc(100vw-3rem)]">
+        <div className="pointer-events-none fixed left-1/2 top-6 z-[140] w-fit max-w-[calc(100vw-3rem)] -translate-x-1/2">
           <div
             role="status"
             aria-live="polite"

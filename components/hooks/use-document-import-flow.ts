@@ -3,7 +3,7 @@
 import { type ChangeEvent, type DragEvent as ReactDragEvent, useCallback, useMemo, useRef, useState } from "react";
 
 import { openApiClient } from "@/lib/client/openapi-client";
-import { assertGraphDocumentCanBeImported, extractTextFromDocument, isSupportedDocumentFile } from "@/components/graph-editor-utils";
+import { extractTextFromDocument, isSupportedDocumentFile } from "@/components/graph-editor-utils";
 
 import {
   createDocumentImportItem,
@@ -20,29 +20,7 @@ type RunAutoLayoutFn = (
     success: string;
     failure: string;
   },
-) => Promise<GraphDocument>;
-
-const TASK_CANVAS_IMPORT_TIMEOUT_MS = 15000;
-const TASK_APPLY_TIMEOUT_MS = 15000;
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
-  return new Promise<T>((resolve, reject) => {
-    const timer = globalThis.setTimeout(() => {
-      reject(new Error(message));
-    }, timeoutMs);
-
-    promise.then(
-      (value) => {
-        globalThis.clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        globalThis.clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
+) => Promise<void | GraphDocument>;
 
 type UseDocumentImportFlowOptions = {
   setStatus: (message: string) => void;
@@ -124,86 +102,22 @@ export function useDocumentImportFlow({
         throw new Error("任务仍在处理中，请稍后从任务列表继续加载结果。");
       }
 
-      if (Array.isArray(taskResult.result?.nodes) && Array.isArray(taskResult.result?.edges)) {
-        onProgress?.({
-          status: "processing",
-          progress: 88,
-          message: "\u540e\u7aef\u7ed3\u679c\u5df2\u8fd4\u56de\uff0c\u6b63\u5728\u5bfc\u5165\u753b\u5e03...",
-        });
-
+      if (taskResult.result?.nodes && taskResult.result?.edges) {
         const importedDocument = parseGraphDocument(
           JSON.stringify({
             data: taskResult.result,
           }),
         );
-        assertGraphDocumentCanBeImported(importedDocument, "\u540e\u7aef\u8fd4\u56de\u7684\u5173\u7cfb\u56fe\u7ed3\u679c");
-
-        try {
-          await withTimeout(
-            runAutoLayout(importedDocument, {
-              start: "\u540e\u7aef\u7ed3\u679c\u5df2\u8fd4\u56de\uff0c\u6b63\u5728\u81ea\u52a8\u6574\u7406\u5e03\u5c40...",
-              success: "\u5df2\u5c06\u540e\u7aef\u4efb\u52a1\u7ed3\u679c\u5bfc\u5165\u753b\u5e03\u3002",
-              failure: "\u4efb\u52a1\u7ed3\u679c\u5df2\u5bfc\u5165\uff0c\u4f46\u81ea\u52a8\u5e03\u5c40\u5931\u8d25\uff0c\u5df2\u4fdd\u7559\u539f\u59cb\u5750\u6807\u3002",
-            }),
-            TASK_CANVAS_IMPORT_TIMEOUT_MS,
-            "\u753b\u5e03\u5bfc\u5165\u8d85\u65f6\uff0c\u5df2\u8df3\u8fc7\u672c\u6b21\u524d\u7aef\u81ea\u52a8\u5bfc\u5165\uff0c\u53ef\u7a0d\u540e\u4ece\u4efb\u52a1\u5217\u8868\u91cd\u65b0\u6253\u5f00\u3002",
-          );
-        } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : "";
-          if (!message.includes("\u8d85\u65f6")) {
-            throw error;
-          }
-
-          onProgress?.({
-            status: "processing",
-            progress: 94,
-            message,
-          });
-        }
+        await runAutoLayout(importedDocument, {
+          start: "后端结果已返回，正在自动整理布局...",
+          success: "已将后端任务结果导入画布。",
+          failure: "任务结果已导入，但自动布局失败，已保留原始坐标。",
+        });
       }
 
-      onProgress?.({
-        status: "processing",
-        progress: 96,
-        message: "\u6b63\u5728\u540c\u6b65\u4efb\u52a1\u7ed3\u679c\u5230\u6570\u636e\u5e93...",
-      });
-
-      const applyPromise = openApiClient.applyTaskResult(taskId);
-
-      try {
-        const applied = await withTimeout(
-          applyPromise,
-          TASK_APPLY_TIMEOUT_MS,
-          "\u4efb\u52a1\u7ed3\u679c\u5df2\u4fdd\u5b58\uff0c\u5165\u56fe\u540c\u6b65\u4ecd\u5728\u540e\u53f0\u7ee7\u7eed\uff0c\u53ef\u7a0d\u540e\u4ece\u4efb\u52a1\u5217\u8868\u67e5\u770b\u3002",
-        );
-
-        onProgress?.({
-          status: "processing",
-          progress: 98,
-          message: "\u4efb\u52a1\u7ed3\u679c\u5df2\u540c\u6b65\u5230\u6570\u636e\u5e93\uff0c\u6b63\u5728\u5b8c\u6210\u6536\u5c3e...",
-        });
-
-        return applied;
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : "";
-        if (!message.includes("\u540e\u53f0\u7ee7\u7eed")) {
-          throw error;
-        }
-
-        void applyPromise.catch((applyError: unknown) => {
-          setStatus(applyError instanceof Error ? applyError.message : "\u4efb\u52a1\u5165\u56fe\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002");
-        });
-
-        onProgress?.({
-          status: "processing",
-          progress: 98,
-          message,
-        });
-
-        return { taskId, status: "validated" as const };
-      }
+      return openApiClient.applyTaskResult(taskId);
     },
-    [parseGraphDocument, runAutoLayout, setStatus],
+    [parseGraphDocument, runAutoLayout],
   );
 
   const appendDocumentFiles = useCallback(
@@ -376,21 +290,14 @@ export function useDocumentImportFlow({
           updateDocumentImportItem(item.id, {
             status: "completed",
             progress: 100,
-            message:
-              processed.status === "applied"
-                ? "\u5904\u7406\u5b8c\u6210\uff0c\u540e\u7aef\u5df2\u81ea\u52a8\u5e94\u7528\u4efb\u52a1\u7ed3\u679c\u3002"
-                : "\u5904\u7406\u5b8c\u6210\uff0c\u753b\u5e03\u5df2\u5bfc\u5165\uff0c\u5165\u56fe\u540c\u6b65\u6b63\u5728\u540e\u53f0\u7ee7\u7eed\u3002",
+            message: processed.status === "applied" ? "处理完成，后端已自动应用任务结果。" : "处理完成。",
           });
         }
 
-        setIsDocumentDragActive(false);
         onTaskChange?.(task.id);
+        setIsDocumentDragActive(false);
         onProcessingCompleted?.(task.id);
-        setStatus(
-          processed.status === "applied"
-            ? "\u6587\u6863\u5904\u7406\u5b8c\u6210\uff0c\u5df2\u5bfc\u5165\u753b\u5e03\u5e76\u540c\u6b65\u5230\u6570\u636e\u5e93\u3002"
-            : "\u6587\u6863\u5904\u7406\u5b8c\u6210\uff0c\u5df2\u5bfc\u5165\u753b\u5e03\uff1b\u5165\u56fe\u540c\u6b65\u6b63\u5728\u540e\u53f0\u7ee7\u7eed\uff0c\u53ef\u7a0d\u540e\u5728\u4efb\u52a1\u5217\u8868\u67e5\u770b\u3002",
-        );
+        setStatus("文档处理队列已完成，已整批提交到任务接口。");
       } catch (error: unknown) {
         for (const item of queue) {
           updateDocumentImportItem(item.id, {
