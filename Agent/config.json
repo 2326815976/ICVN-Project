@@ -1,0 +1,19 @@
+{
+  "API": {
+    "DEEPSEEK_API_KEY": "sk-eac2cc112ccf4151adf0eb76bfca19e5",
+    "BASE_URL": "https://api.deepseek.com/v1"
+  },
+  "PATHS": {
+    "STAGE1_INPUT_FILE": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\Original_Data\\input.json",
+    "STAGE1_OUTPUT_DIR": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\First_Extraction_Out",
+
+    "STAGE2_INPUT_DIR": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\First_Extraction_Out",
+    "STAGE2_OUTPUT_DIR": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\Second_Merge_Out",
+
+    "STAGE3_INPUT_FILE": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\Second_Merge_Out\\Final_Global_Merged.json",
+    "STAGE3_OUTPUT_DIR": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\Last_Out",
+
+    "STAGE4_INPUT_FILE": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\Last_Out\\Logic_Checked_Merged.json",
+    "STAGE4_OUTPUT_FILE": "D:\\DeepLeaning\\Pyprojects\\PyBullet\\Interrogation_Project\\Agent\\Last_Out\\Last_output.json"
+  }
+}
