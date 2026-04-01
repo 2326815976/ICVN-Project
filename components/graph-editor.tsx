@@ -147,7 +147,7 @@ function createExportBackgroundCanvas(options: {
 
   const context = backgroundCanvas.getContext("2d");
   if (!context) {
-    throw new Error("???????????????");
+    throw new Error("无法创建导出背景画布。");
   }
 
   if (options.mode === "plain") {
@@ -184,6 +184,27 @@ function createExportBackgroundCanvas(options: {
   return backgroundCanvas;
 }
 
+function hasStoredNodePositions(document: GraphDocument) {
+  return (
+    document.nodes.length > 0 &&
+    document.nodes.every(
+      (node) => Number.isFinite(node.position?.x) && Number.isFinite(node.position?.y),
+    )
+  );
+}
+
+function getStatusTone(message: string) {
+  if (/(\u5931\u8d25|\u9519\u8bef|\u65e0\u6548|\u4e0d\u53ef\u7528|\u91cd\u8bd5|\u672a\u80fd|\u5f02\u5e38)/u.test(message)) {
+    return "error" as const;
+  }
+
+  if (/(\u6210\u529f|\u5df2\u4fdd\u5b58|\u5df2\u5199\u5165|\u5df2\u5220\u9664|\u5df2\u521b\u5efa|\u5df2\u66f4\u65b0|\u5df2\u52a0\u8f7d|\u5df2\u5bfc\u5165|\u5df2\u5207\u6362|\u5df2\u5904\u7406|\u5df2\u6e05\u7406|\u5df2\u81ea\u52a8)/u.test(message)) {
+    return "success" as const;
+  }
+
+  return "info" as const;
+}
+
 export function GraphEditor() {
   const initialDocument = useMemo(() => createEmptyGraphDocument(), []);
   const initialFile = useMemo(
@@ -195,7 +216,7 @@ export function GraphEditor() {
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<AppNode, AppEdge> | null>(null);
   const [viewport, setViewport] = useState<Viewport>(initialDocument.viewport);
   const [importText, setImportText] = useState(() => stringifyGraphDocument(initialDocument));
-  const [, setStatus] = useState("");
+  const [status, setStatus] = useState("");
   const [workspaceFiles, setWorkspaceFiles] = useState<GraphWorkspaceFile[]>([initialFile]);
   const [activeFileId, setActiveFileId] = useState(initialFile.id);
   const [currentFileName, setCurrentFileName] = useState(initialFile.name);
@@ -262,7 +283,9 @@ export function GraphEditor() {
   const [isTaskListLoading, setIsTaskListLoading] = useState(false);
   const [taskListError, setTaskListError] = useState<string | null>(null);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [isSavingToDatabase, setIsSavingToDatabase] = useState(false);
   const loadingTaskIdRef = useRef<string | null>(null);
+  const statusDismissTimeoutRef = useRef<number | null>(null);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const selectedEdgeLabelOwner = edges.find((edge) => edge.id === selectedEdgeLabelId) ?? null;
@@ -284,6 +307,26 @@ export function GraphEditor() {
   useEffect(() => {
     loadingTaskIdRef.current = loadingTaskId;
   }, [loadingTaskId]);
+  useEffect(() => {
+    if (typeof window === "undefined" || !status) {
+      return;
+    }
+
+    if (statusDismissTimeoutRef.current !== null) {
+      window.clearTimeout(statusDismissTimeoutRef.current);
+    }
+
+    statusDismissTimeoutRef.current = window.setTimeout(() => {
+      setStatus("");
+      statusDismissTimeoutRef.current = null;
+    }, 3200);
+
+    return () => {
+      if (statusDismissTimeoutRef.current !== null) {
+        window.clearTimeout(statusDismissTimeoutRef.current);
+      }
+    };
+  }, [status]);
   const selectedShapeNodes = selectedNodeIds
     .map((nodeId) => nodes.find((node) => node.id === nodeId) ?? null)
     .filter(isShapeNode);
@@ -1926,6 +1969,20 @@ export function GraphEditor() {
     [syncSelectionState],
   );
 
+  const prepareAutoLayoutDocument = useCallback(async (document: GraphDocument) => {
+    try {
+      return {
+        document: await layoutGraphDocument(document),
+        didAutoLayout: true,
+      };
+    } catch {
+      return {
+        document,
+        didAutoLayout: false,
+      };
+    }
+  }, []);
+
   const runAutoLayout = useCallback(
     async (
       document: GraphDocument,
@@ -1934,37 +1991,33 @@ export function GraphEditor() {
         success: string;
         failure: string;
       },
-    ) => {
+    ): Promise<GraphDocument> => {
       setIsImportingLayout(true);
       setStatus(messages.start);
 
       try {
-        let nextDocument = document;
-        let nextStatus = messages.success;
-
-        try {
-          nextDocument = await layoutGraphDocument(document);
-        } catch {
-          nextStatus = messages.failure;
-        }
+        const { document: nextDocument, didAutoLayout } = await prepareAutoLayoutDocument(document);
+        const nextStatus = didAutoLayout ? messages.success : messages.failure;
 
         applyDocument(nextDocument, nextStatus);
+        let finalDocument = nextDocument;
         const nextViewport = await fitViewportToScene({ duration: 320, padding: 0.2 });
         if (nextViewport) {
-          setImportText(
-            stringifyGraphDocument({
-              ...nextDocument,
-              viewport: nextViewport,
-            }),
-          );
+          finalDocument = {
+            ...nextDocument,
+            viewport: nextViewport,
+          };
+          setImportText(stringifyGraphDocument(finalDocument));
         } else if (nextDocument.nodes.length > 0 || nextDocument.edges.length > 0) {
           pendingViewportFitRef.current = { duration: 320, padding: 0.2, syncImportText: true };
         }
+
+        return finalDocument;
       } finally {
         setIsImportingLayout(false);
       }
     },
-    [applyDocument, fitViewportToScene],
+    [applyDocument, fitViewportToScene, prepareAutoLayoutDocument],
   );
 
   const {
@@ -1973,15 +2026,6 @@ export function GraphEditor() {
     isDocumentProcessing,
     isDocumentDragActive,
     setIsDocumentDragActive,
-    quickTaskTitle,
-    setQuickTaskTitle,
-    quickTaskContent,
-    setQuickTaskContent,
-    quickTaskSourceType,
-    setQuickTaskSourceType,
-    isQuickTaskSubmitting,
-    documentImportSummary,
-    documentImportOverallProgress,
     canStartDocumentProcessing,
     hasCompletedDocumentImports,
     handleTriggerDocumentUpload,
@@ -1992,14 +2036,24 @@ export function GraphEditor() {
     handleRemoveDocumentImportItem,
     handleClearCompletedDocumentImports,
     handleStartDocumentProcessing,
-    handleSubmitQuickTextTask,
   } = useDocumentImportFlow({
     setStatus,
     parseGraphDocument,
     runAutoLayout,
     onTaskChange: (taskId) => {
+      const targetFileId = activeFileIdRef.current;
       setSelectedTaskId(taskId);
-      void loadTaskList({ highlightTaskId: taskId, silent: true });
+      void loadTaskList({ highlightTaskId: taskId, silent: true }).then((items) => {
+        const task = items.find((item) => item.id === taskId);
+        if (!task || !["validated", "applied"].includes(task.status)) {
+          return;
+        }
+
+        bindTaskToWorkspaceFile(targetFileId, task.id, {
+          title: task.title,
+          switchToFile: activeFileIdRef.current === targetFileId,
+        });
+      });
     },
   });
 
@@ -2053,11 +2107,30 @@ export function GraphEditor() {
           }),
         );
 
-        await runAutoLayout(importedDocument, {
-          start: `正在加载 ${targetTask?.title ?? taskId} 的关系图...`,
-          success: `已加载 ${targetTask?.title ?? taskId} 的关系图。`,
-          failure: `加载 ${targetTask?.title ?? taskId} 失败，已保留当前画布。`,
-        });
+        const taskTitle = targetTask?.title ?? taskId;
+        if (hasStoredNodePositions(importedDocument)) {
+          applyDocument(importedDocument, `已加载 ${taskTitle} 的关系图。`, {
+            resetHistory: true,
+          });
+
+          const nextViewport = await fitViewportToScene({ duration: 320, padding: 0.2 });
+          if (nextViewport) {
+            setImportText(
+              stringifyGraphDocument({
+                ...importedDocument,
+                viewport: nextViewport,
+              }),
+            );
+          } else if (importedDocument.nodes.length > 0 || importedDocument.edges.length > 0) {
+            pendingViewportFitRef.current = { duration: 320, padding: 0.2, syncImportText: true };
+          }
+        } else {
+          await runAutoLayout(importedDocument, {
+            start: `正在加载 ${taskTitle} 的关系图...`,
+            success: `已加载 ${taskTitle} 的关系图。`,
+            failure: `加载 ${taskTitle} 失败，已保留当前画布。`,
+          });
+        }
         void loadTaskList({ highlightTaskId: taskId, silent: true });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "加载任务失败，请稍后重试。";
@@ -2085,7 +2158,7 @@ export function GraphEditor() {
         setLoadingTaskId(null);
       }
     },
-    [applyDocument, ensureWorkspaceFileForTask, loadTaskList, runAutoLayout, serializeDocument, syncCurrentFileSnapshot],
+    [applyDocument, ensureWorkspaceFileForTask, fitViewportToScene, loadTaskList, runAutoLayout, serializeDocument, syncCurrentFileSnapshot],
   );
   const handleLoadTaskToCanvasRef = useRef(handleLoadTaskToCanvas);
   useEffect(() => {
@@ -2207,7 +2280,15 @@ export function GraphEditor() {
   }, [edges.length, flowInstance, hasCompletedInitialLoad, nodes.length, selectedTaskId]);
   const handleDeleteTask = useCallback(
     async (task: Task) => {
-      if (!window.confirm(`???????${task.title}????????????????????????????`)) {
+      const confirmMessage =
+        task.status === "applied"
+          ? `确认删除任务《${task.title}》吗？
+
+删除后将一并清除数据库中的任务结果、已入图数据以及关联本地文件，且无法恢复。`
+          : `确认删除任务《${task.title}》吗？
+
+删除后将清除任务记录、结果以及关联本地文件，且无法恢复。`;
+      if (!window.confirm(confirmMessage)) {
         return;
       }
 
@@ -2241,7 +2322,7 @@ export function GraphEditor() {
           writeWorkspaceToStorage(nextFiles, replacementFile.id);
 
           if (!nextSelectedTaskId) {
-            applyDocument(replacementFile.document, `??????${task.title}?????????????`, {
+            applyDocument(replacementFile.document, `删除成功，已删除任务《${task.title}》，当前已切换到新的空白画布。`, {
               resetHistory: true,
             });
           }
@@ -2256,7 +2337,7 @@ export function GraphEditor() {
           writeWorkspaceToStorage(nextFiles, fallbackFile.id);
 
           if (!nextSelectedTaskId) {
-            applyDocument(fallbackFile.document, `??????${task.title}???????${fallbackFile.name}??`, {
+            applyDocument(fallbackFile.document, `删除成功，已删除任务《${task.title}》，当前已切换到《${fallbackFile.name}》。`, {
               resetHistory: true,
             });
           }
@@ -2278,22 +2359,21 @@ export function GraphEditor() {
         if (wasSelectedTask && nextSelectedTaskId) {
           await handleLoadTaskToCanvasRef.current(nextSelectedTaskId);
           removeDeletedTaskWorkspaceFile();
-          setStatus(`??????${task.title}???????${preferredNextTask?.title ?? "?????"}??`);
+          setStatus(`删除成功，已删除任务《${task.title}》，当前已切换到《${preferredNextTask?.title ?? "未命名任务"}》。`);
           return;
         }
 
         removeDeletedTaskWorkspaceFile();
-        setStatus(`???${task.title}?????`);
+        setStatus(`删除成功，已删除任务《${task.title}》。`);
         void loadTaskList({ highlightTaskId: nextSelectedTaskId ?? undefined, silent: true });
       } catch (error: unknown) {
-        setStatus(error instanceof Error ? error.message : "?????????????");
+        setStatus(error instanceof Error ? error.message : "删除任务失败，请稍后重试。");
       } finally {
         setDeletingTaskId(null);
       }
     },
     [applyDocument, loadTaskList, selectedTaskId, updateWorkspaceState, writeWorkspaceToStorage],
   );
-
   const handleRenameTask = useCallback(
     async (task: Task, nextTitle: string) => {
       const normalizedName = normalizeGraphFileName(nextTitle, task.title);
@@ -2434,40 +2514,113 @@ export function GraphEditor() {
   }, []);
 
   const handleImport = useCallback(async () => {
+    if (isImportingLayout || isSavingToDatabase) {
+      return;
+    }
+
     try {
       const document = parseGraphDocument(importText);
-      await runAutoLayout(document, {
-        start: "JSON \u89e3\u6790\u6210\u529f\uff0c\u6b63\u5728\u81ea\u52a8\u6574\u7406\u5e03\u5c40...",
-        success: "JSON \u5bfc\u5165\u6210\u529f\uff0c\u5df2\u81ea\u52a8\u6574\u7406\u5e03\u5c40\u3002",
-        failure: "JSON \u5bfc\u5165\u6210\u529f\uff0c\u4f46\u81ea\u52a8\u5e03\u5c40\u5931\u8d25\uff0c\u5df2\u4fdd\u7559\u539f\u59cb\u5750\u6807\u3002",
-      });
+      setIsImportingLayout(true);
+      setStatus("JSON 解析成功，正在自动整理布局...");
 
-      if (selectedTaskId) {
-        const persistedResult = buildTaskResultFromGraphDocument(serializeDocument(), {
+      let persistedDocument: GraphDocument;
+      let didAutoLayout = true;
+
+      try {
+        const prepared = await prepareAutoLayoutDocument(document);
+        persistedDocument = prepared.document;
+        didAutoLayout = prepared.didAutoLayout;
+      } finally {
+        setIsImportingLayout(false);
+      }
+
+      setIsSavingToDatabase(true);
+
+      try {
+        const normalizedName = normalizeGraphFileName(currentFileNameRef.current);
+        let taskId = activeWorkspaceFile?.taskId?.trim() ?? "";
+
+        if (!taskId) {
+          const task = await openApiClient.createDocumentTask({
+            sourceType: "custom",
+            title: normalizedName,
+          });
+
+          bindTaskToWorkspaceFile(activeFileIdRef.current, task.id, {
+            title: task.title,
+            switchToFile: true,
+          });
+          setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+          taskId = task.id;
+        }
+
+        const persistedResult = buildTaskResultFromGraphDocument(persistedDocument, {
           graphId: BACKEND_GRAPH_ID,
           sourceType: "import",
         });
-        await openApiClient.saveTaskResult(selectedTaskId, { result: persistedResult });
-        await loadTaskList({ highlightTaskId: selectedTaskId, silent: true });
-        setStatus("JSON ?????????????");
-      } else {
-        setStatus("JSON ??????????????????????");
-      }
 
-      setIsImportDialogOpen(false);
+        await openApiClient.saveTaskResult(taskId, { result: persistedResult });
+        await openApiClient.applyTaskResult(taskId);
+
+        applyDocument(
+          persistedDocument,
+          didAutoLayout ? "JSON 已保存到数据库，正在导入画布。" : "JSON 已保存到数据库，自动布局失败，正在导入原始坐标。",
+        );
+
+        let finalDocument = persistedDocument;
+        const nextViewport = await fitViewportToScene({ duration: 320, padding: 0.2 });
+        if (nextViewport) {
+          finalDocument = {
+            ...persistedDocument,
+            viewport: nextViewport,
+          };
+        } else if (persistedDocument.nodes.length > 0 || persistedDocument.edges.length > 0) {
+          pendingViewportFitRef.current = { duration: 320, padding: 0.2, syncImportText: true };
+        }
+
+        persistToLocalStorage(finalDocument, {
+          syncImportText: true,
+        });
+
+        setSelectedTaskId(taskId);
+        await loadTaskList({ highlightTaskId: taskId, silent: true });
+        setStatus(
+          didAutoLayout
+            ? `JSON 已保存并导入《${normalizedName}》。`
+            : `JSON 已保存并导入《${normalizedName}》，但自动布局失败，已保留原始坐标。`,
+        );
+        setIsImportDialogOpen(false);
+      } finally {
+        setIsSavingToDatabase(false);
+      }
     } catch (error: unknown) {
-      setStatus(error instanceof Error ? error.message : "\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 JSON \u7ed3\u6784\u3002");
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "导入失败，请检查 JSON 结构。支持 nodes + edges、data.nodes + data.edges、result.nodes + result.edges 以及 AI 原始结果。",
+      );
       setIsImportingLayout(false);
     }
-  }, [importText, loadTaskList, selectedTaskId, serializeDocument, runAutoLayout]);
+  }, [
+    activeWorkspaceFile,
+    applyDocument,
+    bindTaskToWorkspaceFile,
+    fitViewportToScene,
+    importText,
+    isImportingLayout,
+    isSavingToDatabase,
+    loadTaskList,
+    persistToLocalStorage,
+    prepareAutoLayoutDocument,
+  ]);
 
   const handleCloseImportDialog = useCallback(() => {
-    if (isImportingLayout) {
+    if (isImportingLayout || isSavingToDatabase) {
       return;
     }
 
     setIsImportDialogOpen(false);
-  }, [isImportingLayout]);
+  }, [isImportingLayout, isSavingToDatabase]);
 
   const handleRelayout = useCallback(async () => {
     if (shapeNodeCount === 0) {
@@ -2608,6 +2761,60 @@ export function GraphEditor() {
     });
   }, [persistToLocalStorage, serializeDocument]);
 
+  const handleSaveToDatabase = useCallback(async () => {
+    if (isSavingToDatabase) {
+      return;
+    }
+
+    const graphDocument = serializeDocument();
+    persistToLocalStorage(graphDocument, {
+      syncImportText: true,
+    });
+
+    setIsSavingToDatabase(true);
+
+    try {
+      const normalizedName = normalizeGraphFileName(currentFileNameRef.current);
+      let taskId = activeWorkspaceFile?.taskId?.trim() ?? "";
+
+      if (!taskId) {
+        const task = await openApiClient.createDocumentTask({
+          sourceType: "custom",
+          title: normalizedName,
+        });
+
+        bindTaskToWorkspaceFile(activeFileIdRef.current, task.id, {
+          title: task.title,
+          switchToFile: true,
+        });
+        setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+        taskId = task.id;
+      }
+
+      const persistedResult = buildTaskResultFromGraphDocument(graphDocument, {
+        graphId: BACKEND_GRAPH_ID,
+        sourceType: "custom",
+      });
+
+      await openApiClient.saveTaskResult(taskId, { result: persistedResult });
+      await openApiClient.applyTaskResult(taskId);
+      setSelectedTaskId(taskId);
+      await loadTaskList({ highlightTaskId: taskId, silent: true });
+      setStatus(`保存成功：已将《${normalizedName}》关系图写入数据库。`);
+    } catch (error: unknown) {
+      setStatus(error instanceof Error ? error.message : "保存到数据库失败，请稍后重试。");
+    } finally {
+      setIsSavingToDatabase(false);
+    }
+  }, [
+    activeWorkspaceFile,
+    bindTaskToWorkspaceFile,
+    isSavingToDatabase,
+    loadTaskList,
+    persistToLocalStorage,
+    serializeDocument,
+  ]);
+
   const triggerFileDownload = useCallback((url: string, filename: string) => {
     if (typeof window === "undefined") {
       return;
@@ -2701,16 +2908,16 @@ export function GraphEditor() {
 
   const buildCanvasExportCanvas = useCallback(async () => {
     if (typeof window === "undefined") {
-      throw new Error("??????????");
+      throw new Error("当前环境不支持导出。");
     }
 
     if (!flowInstance || !canvasRef.current) {
-      throw new Error("???????????????");
+      throw new Error("画布尚未准备好，暂时无法导出。");
     }
 
     const viewportElement = canvasRef.current.querySelector(".react-flow__viewport") as HTMLElement | null;
     if (!viewportElement) {
-      throw new Error("????????????");
+      throw new Error("未找到可导出的画布视图。");
     }
 
     const waitForNextFrame = () =>
@@ -2721,7 +2928,7 @@ export function GraphEditor() {
     const resolveExportBounds = () => {
       const exportNodes = flowInstance.getNodes().filter((node) => !node.hidden);
       if (exportNodes.length === 0) {
-        throw new Error("????????????????");
+        throw new Error("当前画布为空，无法导出图片。");
       }
 
       const nextBounds = flowInstance.getNodesBounds(exportNodes);
@@ -2750,7 +2957,7 @@ export function GraphEditor() {
       }
 
       if (!bounds) {
-        throw new Error("?????????????????");
+        throw new Error("暂时无法计算导出范围，请稍后重试。");
       }
 
       const exportWidth = Math.max(Math.ceil(bounds.width + EXPORT_PADDING * 2), EXPORT_MIN_WIDTH);
@@ -2783,7 +2990,7 @@ export function GraphEditor() {
             throw error;
           }
 
-          console.warn("html-to-image ?????????????????????", error);
+          console.warn("html-to-image 字体嵌入失败，正在回退为无字体嵌入模式。", error);
           return toCanvas(viewportElement, {
             ...renderOptions,
             skipFonts: true,
@@ -2792,7 +2999,7 @@ export function GraphEditor() {
       })();
 
       if (!canvas) {
-        throw new Error("???????????????");
+        throw new Error("导出画布生成失败。");
       }
 
       return {
@@ -2819,7 +3026,7 @@ export function GraphEditor() {
     });
     const outputContext = outputCanvas.getContext("2d");
     if (!outputContext) {
-      throw new Error("???????????????");
+      throw new Error("无法创建导出画布上下文。");
     }
 
     outputContext.drawImage(exportResult.canvas, 0, 0, outputCanvas.width, outputCanvas.height);
@@ -2837,7 +3044,7 @@ export function GraphEditor() {
     }
 
     if (isCanvasEmpty) {
-      setStatus("????????????");
+      setStatus("当前画布为空，无法导出。");
       return;
     }
 
@@ -2856,7 +3063,7 @@ export function GraphEditor() {
 
   const handleExportPng = useCallback(async () => {
     if (isCanvasEmpty) {
-      setStatus("????????????");
+      setStatus("当前画布为空，无法导出。");
       return;
     }
 
@@ -2887,7 +3094,7 @@ export function GraphEditor() {
 
   const handleExportPdf = useCallback(async () => {
     if (isCanvasEmpty) {
-      setStatus("????????????");
+      setStatus("当前画布为空，无法导出。");
       return;
     }
 
@@ -3154,7 +3361,7 @@ export function GraphEditor() {
 
   const handleToggleExportMenu = useCallback(() => {
     if (isCanvasEmpty) {
-      setStatus("????????????");
+      setStatus("当前画布为空，无法导出。");
       setIsExportMenuOpen(false);
       return;
     }
@@ -3177,7 +3384,7 @@ export function GraphEditor() {
     (type: "json" | "png" | "pdf") => {
       if (isCanvasEmpty) {
         setIsExportMenuOpen(false);
-        setStatus("????????????");
+        setStatus("当前画布为空，无法导出。");
         return;
       }
 
@@ -3488,6 +3695,18 @@ export function GraphEditor() {
             type="button"
             variant="outline"
             className={toolbarButtonClassName}
+            onClick={() => void handleSaveToDatabase()}
+            disabled={isSavingToDatabase}
+            title="保存当前关系图 JSON 到数据库"
+            aria-label="保存到数据库"
+          >
+            <Save className="size-4" />
+            {isSavingToDatabase ? "保存中..." : "保存"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className={toolbarButtonClassName}
             onClick={handleUndo}
             disabled={!canUndo}
             title="撤回（Ctrl/Cmd + Z）"
@@ -3543,6 +3762,45 @@ export function GraphEditor() {
         </div>
 
       </header>
+
+      {status ? (
+        <div className="pointer-events-none fixed right-6 top-6 z-[140] max-w-md">
+          <div
+            role="status"
+            aria-live="polite"
+            className={cn(
+              "pointer-events-auto flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm shadow-[0_18px_50px_-28px_rgba(15,23,42,0.35)] backdrop-blur",
+              getStatusTone(status) === "error"
+                ? "border-rose-200 bg-rose-50/95 text-rose-700"
+                : getStatusTone(status) === "success"
+                  ? "border-emerald-200 bg-emerald-50/95 text-emerald-700"
+                  : "border-sky-200 bg-white/95 text-slate-700",
+            )}
+          >
+            <div
+              className={cn(
+                "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full",
+                getStatusTone(status) === "error"
+                  ? "bg-rose-100 text-rose-600"
+                  : getStatusTone(status) === "success"
+                    ? "bg-emerald-100 text-emerald-600"
+                    : "bg-sky-100 text-sky-600",
+              )}
+            >
+              {getStatusTone(status) === "error" ? <X className="size-3.5" /> : <Check className="size-3.5" />}
+            </div>
+            <div className="min-w-0 flex-1 leading-6">{status}</div>
+            <button
+              type="button"
+              className="shrink-0 rounded-md p-1 text-current/70 transition hover:bg-black/5 hover:text-current"
+              onClick={() => setStatus("")}
+              aria-label="????"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="flex min-h-0 flex-1">
         <aside
@@ -4522,94 +4780,6 @@ export function GraphEditor() {
 
               <div className="flex min-h-0 flex-col gap-4">
                 <div className="rounded-[28px] border border-slate-200 bg-white p-5">
-                  <div className="text-sm font-semibold text-slate-900">{"文本提交任务"}</div>
-                  <p className="mt-2 text-sm leading-6 text-slate-500">
-                    {"粘贴文本后可直接创建后端任务，并自动拉取结果入图。"}
-                  </p>
-                  <div className="mt-4 space-y-3">
-                    <input
-                      value={quickTaskTitle}
-                      onChange={(event) => setQuickTaskTitle(event.target.value)}
-                      className={inputClassName}
-                      placeholder="任务标题（例如：人物关系文本）"
-                      disabled={isDocumentProcessing || isQuickTaskSubmitting}
-                    />
-                    <select
-                      value={quickTaskSourceType}
-                      onChange={(event) =>
-                        setQuickTaskSourceType(event.target.value as "text" | "news" | "social" | "story" | "custom")
-                      }
-                      className={inputClassName}
-                      disabled={isDocumentProcessing || isQuickTaskSubmitting}
-                    >
-                      <option value="text">text</option>
-                      <option value="news">news</option>
-                      <option value="social">social</option>
-                      <option value="story">story</option>
-                      <option value="custom">custom</option>
-                    </select>
-                    <textarea
-                      value={quickTaskContent}
-                      onChange={(event) => setQuickTaskContent(event.target.value)}
-                      className="min-h-[140px] w-full resize-y rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
-                      placeholder="在这里粘贴文本内容，提交后会自动触发任务处理并入图。"
-                      disabled={isDocumentProcessing || isQuickTaskSubmitting}
-                    />
-                    <Button
-                      type="button"
-                      className="w-full bg-sky-600 text-white hover:bg-sky-700 disabled:bg-sky-300"
-                      onClick={() => void handleSubmitQuickTextTask()}
-                      disabled={isDocumentProcessing || isQuickTaskSubmitting || quickTaskContent.trim().length === 0}
-                    >
-                      <FileText className="size-4" />
-                      {isQuickTaskSubmitting ? "提交中..." : "提交文本任务"}
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="rounded-[28px] border border-slate-200 bg-slate-50/70 p-5">
-                  <div className="text-sm font-semibold text-slate-900">{"处理概览"}</div>
-                  <p className="mt-2 text-sm leading-6 text-slate-500">
-                    {"这里展示批量导入的整体节奏与状态，方便后续与你的后端任务系统或轮询接口对接。"}
-                  </p>
-
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-                    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                      <div className="text-xs text-slate-400">{"文档总数"}</div>
-                      <div className="mt-1 text-lg font-semibold text-slate-900">{documentImportSummary.total}</div>
-                    </div>
-                    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                      <div className="text-xs text-slate-400">{"待处理 / 处理中"}</div>
-                      <div className="mt-1 text-lg font-semibold text-slate-900">
-                        {documentImportSummary.pending + documentImportSummary.uploading + documentImportSummary.processing}
-                      </div>
-                    </div>
-                    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                      <div className="text-xs text-slate-400">{"已完成"}</div>
-                      <div className="mt-1 text-lg font-semibold text-emerald-600">{documentImportSummary.completed}</div>
-                    </div>
-                    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                      <div className="text-xs text-slate-400">{"失败"}</div>
-                      <div className="mt-1 text-lg font-semibold text-rose-600">{documentImportSummary.failed}</div>
-                    </div>
-                  </div>
-
-                  <div className="mt-4">
-                    <div className="mb-2 flex items-center justify-between text-xs font-medium text-slate-500">
-                      <span>{"整体进度"}</span>
-                      <span>{documentImportOverallProgress}%</span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-                      <div
-                        className="h-full rounded-full bg-sky-500 transition-all duration-300"
-                        style={{ width: `${documentImportOverallProgress}%` }}
-                      />
-                    </div>
-                  </div>
-                </div>
-
-
-                <div className="rounded-[28px] border border-slate-200 bg-white p-5">
                   <div className="text-sm font-semibold text-slate-900">{"快捷操作"}</div>
                   <div className="mt-4 flex flex-col gap-2">
                     <Button
@@ -4664,7 +4834,7 @@ export function GraphEditor() {
                   variant="outline"
                   className="border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                   onClick={handleCloseImportDialog}
-                  disabled={isImportingLayout}
+                  disabled={isImportingLayout || isSavingToDatabase}
                 >
                   取消
                 </Button>
@@ -4696,10 +4866,10 @@ export function GraphEditor() {
                     type="button"
                     className="bg-sky-600 text-white hover:bg-sky-700 disabled:bg-sky-300"
                     onClick={() => void handleImport()}
-                    disabled={isImportingLayout}
+                    disabled={isImportingLayout || isSavingToDatabase}
                   >
                     <Upload className="size-4" />
-                    {isImportingLayout ? "导入中..." : "导入并布局"}
+                    {isImportingLayout ? "导入中..." : isSavingToDatabase ? "保存中..." : "导入并布局"}
                   </Button>
                 </div>
               </div>

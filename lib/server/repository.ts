@@ -1097,6 +1097,85 @@ async function cleanupNodeAssociations(connection: PoolConnection, nodeIds: stri
   );
 }
 
+async function clearTaskAppliedGraphData(connection: PoolConnection, taskId: string, graphId: string) {
+  const [sourceRecordRows] = await connection.execute<DbRow[]>(
+    "SELECT id FROM source_records WHERE source_type = 'task' AND source_ref_id = :taskId",
+    { taskId },
+  );
+  const sourceRecordIds = sourceRecordRows.map((row) => String(row.id));
+
+  if (sourceRecordIds.length === 0) {
+    return;
+  }
+
+  const [linkRows] = await connection.execute<DbRow[]>(
+    `SELECT entity_type, entity_id FROM entity_source_links WHERE source_record_id IN (${sourceRecordIds.map(() => "?").join(", ")})`,
+    sourceRecordIds,
+  );
+
+  const nodeIds = new Set<string>();
+  const edgeIds = new Set<string>();
+
+  for (const row of linkRows) {
+    const entityId = String(row.entity_id);
+    if (row.entity_type === "node") {
+      nodeIds.add(entityId);
+    }
+    if (row.entity_type === "edge") {
+      edgeIds.add(entityId);
+    }
+  }
+
+  const nodeIdList = [...nodeIds];
+  if (nodeIdList.length > 0) {
+    const placeholders = nodeIdList.map(() => "?").join(", ");
+    const [incidentEdgeRows] = await connection.execute<DbRow[]>(
+      `SELECT DISTINCT id FROM graph_edges WHERE graph_id = ? AND (source_id IN (${placeholders}) OR target_id IN (${placeholders}))`,
+      [graphId, ...nodeIdList, ...nodeIdList],
+    );
+
+    for (const row of incidentEdgeRows) {
+      edgeIds.add(String(row.id));
+    }
+  }
+
+  const edgeIdList = [...edgeIds];
+  if (edgeIdList.length > 0) {
+    await deleteEdgesAndAssociations(connection, edgeIdList);
+  }
+
+  if (nodeIdList.length > 0) {
+    await cleanupNodeAssociations(connection, nodeIdList);
+    await connection.execute(
+      `DELETE FROM graph_nodes WHERE id IN (${nodeIdList.map(() => "?").join(", ")})`,
+      nodeIdList,
+    );
+  }
+
+  const historyClauses = [`source_record_id IN (${sourceRecordIds.map(() => "?").join(", ")})`];
+  const historyParams: string[] = [...sourceRecordIds];
+
+  if (nodeIdList.length > 0) {
+    historyClauses.push(`(graph_id = ? AND entity_type = 'node' AND entity_id IN (${nodeIdList.map(() => "?").join(", ")}))`);
+    historyParams.push(graphId, ...nodeIdList);
+  }
+
+  if (edgeIdList.length > 0) {
+    historyClauses.push(`(graph_id = ? AND entity_type = 'edge' AND entity_id IN (${edgeIdList.map(() => "?").join(", ")}))`);
+    historyParams.push(graphId, ...edgeIdList);
+  }
+
+  await connection.execute(
+    `DELETE FROM graph_change_history WHERE ${historyClauses.join(" OR ")}`,
+    historyParams,
+  );
+
+  await connection.execute(
+    `DELETE FROM source_records WHERE id IN (${sourceRecordIds.map(() => "?").join(", ")})`,
+    sourceRecordIds,
+  );
+}
+
 export async function createTask(input: CreateTaskRequest) {
   return withTransaction(async (connection) => {
     const graphId = getDefaultGraphId();
@@ -1197,7 +1276,7 @@ export async function listTasks(params: {
         FROM tasks t
         LEFT JOIN task_results tr ON tr.task_id = t.id
         WHERE ${clauses.join(" AND ")}
-        ORDER BY t.created_at DESC, t.updated_at DESC
+        ORDER BY t.updated_at DESC, t.created_at DESC
       `,
       queryParams,
     );
@@ -1280,10 +1359,107 @@ export async function updateTask(taskId: string, input: UpdateTaskRequest) {
 
 export async function deleteTask(taskId: string) {
   return withTransaction(async (connection) => {
-    const task = await getTaskOrThrow(connection, taskId);
+    const taskRow = await getTaskRow(connection, taskId);
 
-    if (task.status === "applied") {
-      throw new ApiError(409, "TASK_DELETE_FORBIDDEN", "Applied task cannot be deleted");
+    if (!taskRow) {
+      throw new ApiError(404, "TASK_NOT_FOUND", "Task not found");
+    }
+
+    const graphId = String(taskRow.graph_id);
+    const [sourceRecordRows] = await connection.execute<DbRow[]>(
+      "SELECT id FROM source_records WHERE source_type = 'task' AND source_ref_id = :taskId",
+      { taskId },
+    );
+    const sourceRecordIds = sourceRecordRows.map((row) => String(row.id));
+    const resultRecord = await getTaskResultRecord(connection, taskId);
+    const result = fromJsonValue<AiParseResult | undefined>(resultRecord?.normalized_result, undefined);
+    const nodeIds = new Set<string>();
+    const edgeIds = new Set<string>();
+
+    for (const node of [...(result?.nodes ?? []), ...(result?.events ?? [])]) {
+      const nodeId = typeof node.id === "string" ? node.id.trim() : "";
+      if (nodeId) {
+        nodeIds.add(nodeId);
+      }
+    }
+
+    for (const edge of result?.edges ?? []) {
+      const edgeId = typeof edge.id === "string" ? edge.id.trim() : "";
+      if (edgeId) {
+        edgeIds.add(edgeId);
+      }
+    }
+
+    if (sourceRecordIds.length > 0) {
+      const [linkRows] = await connection.execute<DbRow[]>(
+        `SELECT entity_type, entity_id FROM entity_source_links WHERE source_record_id IN (${sourceRecordIds.map(() => "?").join(", ")})`,
+        sourceRecordIds,
+      );
+
+      for (const row of linkRows) {
+        const entityId = String(row.entity_id);
+        if (row.entity_type === "node") {
+          nodeIds.add(entityId);
+        }
+        if (row.entity_type === "edge") {
+          edgeIds.add(entityId);
+        }
+      }
+    }
+
+    const nodeIdList = [...nodeIds];
+    if (String(taskRow.status) === "applied" && nodeIdList.length > 0) {
+      const placeholders = nodeIdList.map(() => "?").join(", ");
+      const [incidentEdgeRows] = await connection.execute<DbRow[]>(
+        `SELECT DISTINCT id FROM graph_edges WHERE graph_id = ? AND (source_id IN (${placeholders}) OR target_id IN (${placeholders}))`,
+        [graphId, ...nodeIdList, ...nodeIdList],
+      );
+
+      for (const row of incidentEdgeRows) {
+        edgeIds.add(String(row.id));
+      }
+    }
+
+    const edgeIdList = [...edgeIds];
+    if (String(taskRow.status) === "applied" && edgeIdList.length > 0) {
+      await deleteEdgesAndAssociations(connection, edgeIdList);
+    }
+
+    if (String(taskRow.status) === "applied" && nodeIdList.length > 0) {
+      await cleanupNodeAssociations(connection, nodeIdList);
+      await connection.execute(
+        `DELETE FROM graph_nodes WHERE id IN (${nodeIdList.map(() => "?").join(", ")})`,
+        nodeIdList,
+      );
+    }
+
+    const historyClauses: string[] = [];
+    const historyParams: string[] = [];
+
+    if (sourceRecordIds.length > 0) {
+      historyClauses.push(`source_record_id IN (${sourceRecordIds.map(() => "?").join(", ")})`);
+      historyParams.push(...sourceRecordIds);
+    }
+
+    if (nodeIdList.length > 0) {
+      historyClauses.push(`(graph_id = ? AND entity_type = 'node' AND entity_id IN (${nodeIdList.map(() => "?").join(", ")}))`);
+      historyParams.push(graphId, ...nodeIdList);
+    }
+
+    if (edgeIdList.length > 0) {
+      historyClauses.push(`(graph_id = ? AND entity_type = 'edge' AND entity_id IN (${edgeIdList.map(() => "?").join(", ")}))`);
+      historyParams.push(graphId, ...edgeIdList);
+    }
+
+    if (historyClauses.length > 0) {
+      await connection.execute(`DELETE FROM graph_change_history WHERE ${historyClauses.join(" OR ")}`, historyParams);
+    }
+
+    if (sourceRecordIds.length > 0) {
+      await connection.execute(
+        `DELETE FROM source_records WHERE id IN (${sourceRecordIds.map(() => "?").join(", ")})`,
+        sourceRecordIds,
+      );
     }
 
     await connection.execute("DELETE FROM tasks WHERE id = :taskId", { taskId });
@@ -1294,7 +1470,6 @@ export async function deleteTask(taskId: string) {
     } satisfies TaskDeleteResponse;
   });
 }
-
 export async function getTaskResult(taskId: string) {
   return withConnection(async (connection) => {
     const task = await getTaskOrThrow(connection, taskId);
@@ -1363,7 +1538,7 @@ export async function saveTaskResult(taskId: string, input: SaveTaskResultReques
     await appendTaskEvents(connection, taskId, [
       {
         type: "manual_result_saved",
-        message: "??????????????",
+        message: "已保存手动导入结果。",
         payload: {
           status: "validated",
           source: "manual_import",
@@ -1393,14 +1568,13 @@ export async function aiParseContent(input: AiParseRequest) {
 
 export async function applyTaskResult(taskId: string) {
   return withTransaction(async (connection) => {
-    const task = await getTaskOrThrow(connection, taskId);
+    const taskRow = await getTaskRow(connection, taskId);
 
-    if (task.status === "applied") {
-      return {
-        taskId,
-        status: "applied",
-      } satisfies TaskApplyResponse;
+    if (!taskRow) {
+      throw new ApiError(404, "TASK_NOT_FOUND", "Task not found");
     }
+
+    const task = mapTask(taskRow, await getTaskFiles(connection, taskId));
 
     if (task.status === "processing" || task.status === "queued") {
       throw new ApiError(409, "TASK_NOT_APPLICABLE", "Task is still processing");
@@ -1421,10 +1595,13 @@ export async function applyTaskResult(taskId: string) {
       throw new ApiError(409, "TASK_RESULT_NOT_READY", "Task result is not available");
     }
 
+    const graphId = String(taskRow.graph_id ?? getDefaultGraphId());
+    await clearTaskAppliedGraphData(connection, taskId, graphId);
+
     const applied = await applyResultToGraph(connection, {
       taskId,
       title: task.title,
-      graphId: getDefaultGraphId(),
+      graphId,
       contentPreview: undefined,
       result,
     });

@@ -20,7 +20,7 @@ type RunAutoLayoutFn = (
     success: string;
     failure: string;
   },
-) => Promise<void>;
+) => Promise<GraphDocument>;
 
 type UseDocumentImportFlowOptions = {
   setStatus: (message: string) => void;

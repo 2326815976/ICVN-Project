@@ -707,7 +707,7 @@ export function TaskList({
         const isSelected = task.id === selectedTaskId;
         const isSelectionLocked = loadingTaskId !== null;
         const isDeleting = deletingTaskId === task.id;
-        const canDelete = task.status !== "applied";
+        const canDelete = true;
 
         return (
           <div
@@ -748,10 +748,10 @@ export function TaskList({
                 variant="ghost"
                 size="icon"
                 className={cn(
-                  "absolute right-3 top-3 size-8 rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600",
-                  !canDelete ? "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-slate-400" : undefined,
+                  "absolute right-3 top-3 size-8 rounded-lg text-rose-500 hover:bg-rose-50 hover:text-rose-600 disabled:text-rose-300",
+                  !canDelete ? "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-rose-500" : undefined,
                 )}
-                title={canDelete ? `删除任务 ${task.title}` : "已入图任务暂不支持删除"}
+                title={`删除任务 ${task.title}`}
                 disabled={!canDelete || isDeleting || isSelectionLocked}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -789,8 +789,8 @@ export function ShapePreview({ kind }: { kind: ShapeNodeKind }) {
     <div className="flex h-8 w-14 items-center justify-center">
       <div
         className={cn(
-          "h-7 w-12 border border-slate-500 bg-white",
-          kind === "rounded" ? "rounded-[14px]" : "rounded-sm",
+          "border border-slate-500 bg-white",
+          kind === "rounded" ? "h-8 w-12 rounded-[18px]" : "h-7 w-12 rounded-[4px]",
         )}
       />
     </div>

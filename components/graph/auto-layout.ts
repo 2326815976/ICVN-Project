@@ -717,7 +717,7 @@ type OptimizedEdgeLabelPlacement = {
 
 function getEdgeLabelText(label: string) {
   const trimmed = label.trim();
-  return trimmed.length > 0 ? label : "??????????";
+  return trimmed.length > 0 ? label : "未命名关系";
 }
 
 function hasMeaningfulLabelOffset(value: NonNullable<AppEdge["data"]>["labelOffset"]) {

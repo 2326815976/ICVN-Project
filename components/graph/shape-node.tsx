@@ -290,8 +290,8 @@ export function ShapeNode({ id, data, selected, width, height }: NodeProps<AppNo
       : nodeData.kind === "ellipse"
         ? "flex items-center justify-center rounded-[999px] border bg-white px-6 py-5"
         : nodeData.kind === "rounded"
-          ? "flex items-center justify-center rounded-[28px] border bg-white px-6 py-5"
-          : "flex items-center justify-center rounded-[18px] border bg-white px-5 py-4";
+          ? "flex items-center justify-center rounded-[30px] border bg-white px-6 py-5"
+          : "flex items-center justify-center rounded-[8px] border bg-white px-5 py-4";
 
   const resizeControls = selected
     ? RESIZE_HANDLE_POSITIONS.map((position) => (
