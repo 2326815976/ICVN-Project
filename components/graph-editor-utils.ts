@@ -789,7 +789,7 @@ function buildTaskResultNode(node: AppNode, index: number, graphId: string, nowI
       : undefined;
 
   if (node.type === "lineNode") {
-    const label = getNodeTitle(node.data.text, `?? ${index + 1}`);
+    const label = getNodeTitle(node.data.text, `未命名文本 ${index + 1}`);
     const taskNode = {
       id: node.id || `line_${index + 1}`,
       graphId,
@@ -815,7 +815,7 @@ function buildTaskResultNode(node: AppNode, index: number, graphId: string, nowI
     return taskNode as TaskGraphNode;
   }
 
-  const label = getNodeTitle(node.data.text, `?? ${index + 1}`);
+  const label = getNodeTitle(node.data.text, `未命名节点 ${index + 1}`);
   const taskNode = {
     id: node.id || `node_${index + 1}`,
     graphId,
@@ -849,14 +849,14 @@ function buildTaskResultEdge(edge: AppEdge, index: number, graphId: string, nowI
     marker: "none",
   };
   const label = typeof edge.label === "string" ? edge.label.trim() : "";
-  const relation = label || (edgeData.isEventEdge ? "event" : "related");
+  const relation = label;
   const taskEdge = {
     id: edge.id || `edge_${index + 1}`,
     graphId,
     sourceId: edge.source,
     targetId: edge.target,
     relation,
-    label: label || relation,
+    label,
     properties: toJsonRecord({
       sourceHandle: edge.sourceHandle,
       targetHandle: edge.targetHandle,

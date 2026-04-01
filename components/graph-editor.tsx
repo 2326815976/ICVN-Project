@@ -223,6 +223,54 @@ function isReusableDefaultWorkspaceFile(file: GraphWorkspaceFile) {
   return !file.taskId && file.name === DEFAULT_FILE_NAME && isEmptyGraphDocument(file.document);
 }
 
+function hasWorkspaceDocumentContent(document: GraphDocument) {
+  return document.nodes.length > 0 || document.edges.length > 0;
+}
+
+function getWorkspaceFileTimestamp(file: GraphWorkspaceFile) {
+  const updatedAt = Date.parse(file.updatedAt);
+  if (Number.isFinite(updatedAt)) {
+    return updatedAt;
+  }
+
+  const createdAt = Date.parse(file.createdAt);
+  return Number.isFinite(createdAt) ? createdAt : 0;
+}
+
+function pickPreferredWorkspaceFileForTask(
+  currentFile: GraphWorkspaceFile | null,
+  candidateFile: GraphWorkspaceFile,
+  activeFileId: string,
+) {
+  if (!currentFile) {
+    return candidateFile;
+  }
+
+  if (currentFile.id === activeFileId) {
+    return currentFile;
+  }
+
+  if (candidateFile.id === activeFileId) {
+    return candidateFile;
+  }
+
+  const currentIsBound = Boolean(currentFile.taskId);
+  const candidateIsBound = Boolean(candidateFile.taskId);
+  if (currentIsBound !== candidateIsBound) {
+    return candidateIsBound ? candidateFile : currentFile;
+  }
+
+  const currentHasContent = hasWorkspaceDocumentContent(currentFile.document);
+  const candidateHasContent = hasWorkspaceDocumentContent(candidateFile.document);
+  if (currentHasContent !== candidateHasContent) {
+    return candidateHasContent ? candidateFile : currentFile;
+  }
+
+  return getWorkspaceFileTimestamp(candidateFile) > getWorkspaceFileTimestamp(currentFile)
+    ? candidateFile
+    : currentFile;
+}
+
 function getStatusTone(message: string) {
   if (/(\u5931\u8d25|\u9519\u8bef|\u65e0\u6548|\u4e0d\u53ef\u7528|\u91cd\u8bd5|\u672a\u80fd|\u5f02\u5e38|\u8d85\u65f6)/u.test(message)) {
     return "error" as const;
@@ -324,6 +372,10 @@ export function GraphEditor() {
   const activeWorkspaceFile = workspaceFiles.find((file) => file.id === activeFileId) ?? null;
   const selectedWorkspaceFile = workspaceFiles.find((file) => file.id === selectedWorkspaceFileId) ?? null;
   const loadingTask = loadingTaskId ? tasks.find((task) => task.id === loadingTaskId) ?? null : null;
+  const canvasSummaryText =
+    tasks.length > 0
+      ? `任务共 ${tasks.length} 个，当前文件包含 ${nodes.length} 个图形和 ${edges.length} 条连线`
+      : `本地文件共 ${workspaceFiles.length} 个，当前文件包含 ${nodes.length} 个图形和 ${edges.length} 条连线`;
   const selectedWorkspaceFilePreview = useMemo(
     () => (selectedWorkspaceFile ? stringifyGraphDocument(selectedWorkspaceFile.document) : ""),
     [selectedWorkspaceFile],
@@ -772,45 +824,85 @@ export function GraphEditor() {
       }
 
       const taskIds = new Set(taskItems.map((task) => task.id));
-      let nextFiles = workspaceFilesRef.current.filter((file) => !file.taskId || taskIds.has(file.taskId));
-      let didChange = nextFiles.length !== workspaceFilesRef.current.length;
+      const baseFiles = workspaceFilesRef.current.filter((file) => !file.taskId || taskIds.has(file.taskId));
+      let didChange = baseFiles.length !== workspaceFilesRef.current.length;
+      const redundantFileIds = new Set<string>();
+      const claimedFileIds = new Set<string>();
+      const replacementFiles = new Map<string, GraphWorkspaceFile>();
+      const placeholderFiles: GraphWorkspaceFile[] = [];
 
       for (const task of taskItems) {
         const normalizedTitle = normalizeGraphFileName(task.title);
-        const matchedFile =
-          nextFiles.find((file) => file.taskId === task.id) ??
-          nextFiles.find((file) => !file.taskId && file.name === task.title) ??
-          nextFiles.find((file) => isReusableDefaultWorkspaceFile(file)) ??
-          null;
+        const candidates = baseFiles.filter(
+          (file) =>
+            !claimedFileIds.has(file.id) &&
+            (file.taskId === task.id || (!file.taskId && normalizeGraphFileName(file.name) === normalizedTitle)),
+        );
 
-        if (matchedFile) {
-          const needsBinding = matchedFile.taskId !== task.id;
-          const needsRename = matchedFile.name !== normalizedTitle;
+        let preferredFile: GraphWorkspaceFile | null = null;
+        for (const candidate of candidates) {
+          preferredFile = pickPreferredWorkspaceFileForTask(preferredFile, candidate, activeFileIdRef.current);
+        }
 
-          if (!needsBinding && !needsRename) {
-            continue;
-          }
-
-          const reboundFile = createWorkspaceFile({
-            ...matchedFile,
-            name: normalizedTitle,
-            taskId: task.id,
-          });
-          nextFiles = replaceWorkspaceFile(nextFiles, reboundFile);
+        if (!preferredFile) {
+          placeholderFiles.push(
+            createWorkspaceFile({
+              name: task.title,
+              taskId: task.id,
+              document: createEmptyGraphDocument(),
+            }),
+          );
           didChange = true;
           continue;
         }
 
-        nextFiles = [
-          ...nextFiles,
-          createWorkspaceFile({
-            name: task.title,
-            taskId: task.id,
-            document: createEmptyGraphDocument(),
-          }),
-        ];
-        didChange = true;
+        for (const candidate of candidates) {
+          if (candidate.id !== preferredFile.id) {
+            redundantFileIds.add(candidate.id);
+            didChange = true;
+          }
+        }
+
+        claimedFileIds.add(preferredFile.id);
+
+        const needsBinding = preferredFile.taskId !== task.id;
+        const needsRename = normalizeGraphFileName(preferredFile.name) !== normalizedTitle;
+        if (needsBinding || needsRename) {
+          replacementFiles.set(
+            preferredFile.id,
+            createWorkspaceFile({
+              ...preferredFile,
+              name: normalizedTitle,
+              taskId: task.id,
+            }),
+          );
+          didChange = true;
+          continue;
+        }
+
+        replacementFiles.set(preferredFile.id, preferredFile);
       }
+
+      const nextFiles = [
+        ...baseFiles.flatMap((file) => {
+          if (redundantFileIds.has(file.id)) {
+            return [];
+          }
+
+          const replacementFile = replacementFiles.get(file.id);
+          if (replacementFile) {
+            return [replacementFile];
+          }
+
+          if (!file.taskId && !isReusableDefaultWorkspaceFile(file)) {
+            return [file];
+          }
+
+          didChange = true;
+          return [];
+        }),
+        ...placeholderFiles,
+      ];
 
       if (!didChange || nextFiles.length === 0) {
         return false;
@@ -837,9 +929,12 @@ export function GraphEditor() {
 
   const ensureWorkspaceFileForTask = useCallback(
     (task: Task, options?: { switchToFile?: boolean }) => {
+      const normalizedTaskTitle = normalizeGraphFileName(task.title);
       const existingWorkspaceFile =
         workspaceFilesRef.current.find((file) => file.taskId === task.id) ??
-        workspaceFilesRef.current.find((file) => !file.taskId && file.name === task.title);
+        workspaceFilesRef.current.find(
+          (file) => !file.taskId && normalizeGraphFileName(file.name) === normalizedTaskTitle,
+        );
 
       if (existingWorkspaceFile) {
         return (
@@ -3854,7 +3949,7 @@ export function GraphEditor() {
                 />
               </div>
               <p className="truncate text-xs text-slate-500">
-                {`本地文件共 ${workspaceFiles.length} 个，当前文件包含 ${nodes.length} 个图形和 ${edges.length} 条连线`}
+                {canvasSummaryText}
               </p>
             </div>
           </div>
@@ -4150,7 +4245,7 @@ export function GraphEditor() {
                     <button
                       type="button"
                       aria-expanded={!isTaskListCollapsed}
-                      aria-label={isTaskListCollapsed ? "展开任务列表" : "收起任务列表"}
+            aria-label={isTaskListCollapsed ? "展开任务列表" : "收起任务列表"}
                       className="flex size-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-200"
                       onClick={() => setIsTaskListCollapsed((current) => !current)}
                     >
@@ -4867,14 +4962,14 @@ export function GraphEditor() {
           <div
             role="dialog"
             aria-modal="true"
-            aria-label={"新建任务/导入文档解析"}
+            aria-label={"导入文档解析"}
             className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_28px_120px_-36px_rgba(15,23,42,0.38)]"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="border-b border-slate-200 px-6 py-5">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                  <h2 className="text-lg font-semibold text-slate-900">{"新建任务/导入文档解析"}</h2>
+                  <h2 className="text-lg font-semibold text-slate-900">{"导入文档解析"}</h2>
                   <p className="mt-1 text-sm leading-6 text-slate-500">
                     {"通过上传文档或输入文本来创建新任务，支持批量处理、AI 解析和结果入图。"}
                   </p>
@@ -5002,12 +5097,12 @@ export function GraphEditor() {
                                   <span className={cn("rounded-full px-2.5 py-1 font-medium", statusMeta.badgeClassName)}>
                                     {statusMeta.label}
                                   </span>
-                                  <span className="font-medium text-slate-500">{item.progress}%</span>
+                                  <span className="font-medium text-slate-500">{Math.min(100, Math.max(0, Math.round(item.progress)))}%</span>
                                 </div>
                                 <div className="h-2 overflow-hidden rounded-full bg-slate-100">
                                   <div
-                                    className={cn("h-full rounded-full transition-all duration-300", statusMeta.progressClassName)}
-                                    style={{ width: `${item.progress}%` }}
+                                    className={cn("h-full rounded-full transition-all duration-1000 ease-linear", statusMeta.progressClassName)}
+                                    style={{ width: `${Math.min(100, Math.max(0, item.progress))}%` }}
                                   />
                                 </div>
                                 <p className="mt-2 text-xs leading-5 text-slate-500">{item.message}</p>

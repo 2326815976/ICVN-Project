@@ -3,9 +3,10 @@
 import { type ChangeEvent, type DragEvent as ReactDragEvent, useCallback, useMemo, useRef, useState } from "react";
 
 import { openApiClient } from "@/lib/client/openapi-client";
-import { extractTextFromDocument, isSupportedDocumentFile } from "@/components/graph-editor-utils";
+import { buildTaskResultFromGraphDocument, extractTextFromDocument, isSupportedDocumentFile } from "@/components/graph-editor-utils";
 
 import {
+  BACKEND_GRAPH_ID,
   createDocumentImportItem,
   sleep,
   type DocumentImportItem,
@@ -30,6 +31,44 @@ type UseDocumentImportFlowOptions = {
   onProcessingCompleted?: (taskId: string) => void;
 };
 
+function getTaskProcessStatusLabel(status: string) {
+  switch (status) {
+    case "queued":
+      return "排队中";
+    case "uploaded":
+      return "已上传";
+    case "processing":
+      return "处理中";
+    case "validated":
+      return "已校验";
+    case "applied":
+      return "已应用";
+    case "failed":
+      return "失败";
+    default:
+      return status;
+  }
+}
+
+
+const DOCUMENT_PROCESSING_PROGRESS_START = 55;
+const DOCUMENT_PROCESSING_PROGRESS_TARGET = 99;
+const DOCUMENT_PROCESSING_PROGRESS_TARGET_MS = 5.5 * 60 * 1000;
+
+function getSmoothedProcessingProgress(startedAt: number, status: string, currentProgress: number) {
+  const elapsedMs = Math.max(0, Date.now() - startedAt);
+  const normalized = Math.min(elapsedMs / DOCUMENT_PROCESSING_PROGRESS_TARGET_MS, 1);
+  const eased = 1 - Math.pow(1 - normalized, 1.12);
+  const simulatedProgress =
+    DOCUMENT_PROCESSING_PROGRESS_START +
+    (DOCUMENT_PROCESSING_PROGRESS_TARGET - DOCUMENT_PROCESSING_PROGRESS_START) * eased;
+  const statusFloor = status === "validated" || status === "applied" ? DOCUMENT_PROCESSING_PROGRESS_TARGET : 0;
+
+  return Math.min(
+    DOCUMENT_PROCESSING_PROGRESS_TARGET,
+    Number(Math.max(currentProgress, simulatedProgress, statusFloor).toFixed(1)),
+  );
+}
 export function useDocumentImportFlow({
   setStatus,
   parseGraphDocument,
@@ -52,45 +91,77 @@ export function useDocumentImportFlow({
     );
   }, []);
 
+  const resetDocumentImportForm = useCallback(() => {
+    setDocumentImportItems([]);
+    setIsDocumentDragActive(false);
+    setQuickTaskTitle("文本任务");
+    setQuickTaskContent("");
+    setQuickTaskSourceType("text");
+    if (documentImportInputRef.current) {
+      documentImportInputRef.current.value = "";
+    }
+  }, []);
+
   const processTaskToCanvas = useCallback(
     async (
       taskId: string,
       onProgress?: (payload: { status: DocumentImportStatus; progress: number; message: string }) => void,
     ) => {
       let latestStatus = "queued";
+      let latestSourceType = "document";
       const maxAttempts = 360;
+      const startedAt = Date.now();
+      let latestProgress = DOCUMENT_PROCESSING_PROGRESS_START;
+      let progressTimer: ReturnType<typeof setInterval> | null = null;
       let resultLoaded = false;
       let taskResult: Awaited<ReturnType<typeof openApiClient.getTaskResult>> | null = null;
 
-      for (let index = 0; index < maxAttempts; index += 1) {
-        await sleep(5000);
-        const detail = await openApiClient.getTaskDetail(taskId);
-        latestStatus = detail.status;
-        const elapsedMinutes = Math.floor(((index + 1) * 5) / 60);
+      const emitProcessingProgress = () => {
+        const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+        const elapsedRemainderSeconds = elapsedSeconds % 60;
+        const elapsedText = `${String(elapsedMinutes).padStart(2, "0")}:${String(elapsedRemainderSeconds).padStart(2, "0")}`;
+        latestProgress = getSmoothedProcessingProgress(startedAt, latestStatus, latestProgress);
+
         onProgress?.({
           status: "processing",
-          progress: Math.min(95, 55 + Math.floor(((index + 1) / maxAttempts) * 40)),
-          message:
-            elapsedMinutes > 0
-              ? `任务状态：${latestStatus}，已等待约 ${elapsedMinutes} 分钟`
-              : `任务状态：${latestStatus}`,
+          progress: latestProgress,
+          message: `任务状态：${getTaskProcessStatusLabel(latestStatus)}，已等待 ${elapsedText}`,
         });
+      };
 
-        if (latestStatus === "failed") {
-          break;
-        }
+      emitProcessingProgress();
+      progressTimer = setInterval(emitProcessingProgress, 1000);
 
-        if (latestStatus === "validated" || latestStatus === "applied") {
-          try {
-            taskResult = await openApiClient.getTaskResult(taskId);
-            resultLoaded = true;
+      try {
+        for (let index = 0; index < maxAttempts; index += 1) {
+          await sleep(5000);
+          const detail = await openApiClient.getTaskDetail(taskId);
+          latestStatus = detail.status;
+          latestSourceType = detail.sourceType || latestSourceType;
+          latestProgress = getSmoothedProcessingProgress(startedAt, latestStatus, latestProgress);
+          emitProcessingProgress();
+
+          if (latestStatus === "failed") {
             break;
-          } catch (error: unknown) {
-            const message = error instanceof Error ? error.message : "";
-            if (!message.includes("Task result is not ready")) {
-              throw error;
+          }
+
+          if (latestStatus === "validated" || latestStatus === "applied") {
+            try {
+              taskResult = await openApiClient.getTaskResult(taskId);
+              resultLoaded = true;
+              break;
+            } catch (error: unknown) {
+              const message = error instanceof Error ? error.message : "";
+              if (!message.includes("Task result is not ready")) {
+                throw error;
+              }
             }
           }
+        }
+      } finally {
+        if (progressTimer) {
+          clearInterval(progressTimer);
         }
       }
 
@@ -108,11 +179,19 @@ export function useDocumentImportFlow({
             data: taskResult.result,
           }),
         );
-        await runAutoLayout(importedDocument, {
-          start: "后端结果已返回，正在自动整理布局...",
-          success: "已将后端任务结果导入画布。",
-          failure: "任务结果已导入，但自动布局失败，已保留原始坐标。",
+        const finalDocument =
+          (await runAutoLayout(importedDocument, {
+            start: "后端结果已返回，正在自动整理布局...",
+            success: "已将后端任务结果导入画布。",
+            failure: "任务结果已导入，但自动布局失败，已保留原始坐标。",
+          })) ?? importedDocument;
+
+        const persistedResult = buildTaskResultFromGraphDocument(finalDocument, {
+          graphId: BACKEND_GRAPH_ID,
+          sourceType: latestSourceType,
         });
+
+        await openApiClient.saveTaskResult(taskId, { result: persistedResult });
       }
 
       return openApiClient.applyTaskResult(taskId);
@@ -295,9 +374,9 @@ export function useDocumentImportFlow({
         }
 
         onTaskChange?.(task.id);
-        setIsDocumentDragActive(false);
-        onProcessingCompleted?.(task.id);
         setStatus("文档处理队列已完成，已整批提交到任务接口。");
+        resetDocumentImportForm();
+        onProcessingCompleted?.(task.id);
       } catch (error: unknown) {
         for (const item of queue) {
           updateDocumentImportItem(item.id, {
@@ -311,7 +390,7 @@ export function useDocumentImportFlow({
     } finally {
       setIsDocumentProcessing(false);
     }
-  }, [documentImportItems, onProcessingCompleted, onTaskChange, processTaskToCanvas, setStatus, updateDocumentImportItem]);
+  }, [documentImportItems, onProcessingCompleted, onTaskChange, processTaskToCanvas, resetDocumentImportForm, setStatus, updateDocumentImportItem]);
 
   const handleSubmitQuickTextTask = useCallback(async () => {
     const content = quickTaskContent.trim();

@@ -65,6 +65,8 @@ export function getTaskSourceTypeLabel(sourceType: TaskSourceType) {
   }
 }
 
+
+
 export function Field({ children, label }: { children: ReactNode; label: string }) {
   return (
     <label className="block space-y-2">
@@ -729,7 +731,9 @@ export function TaskList({
 
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-semibold text-slate-900">{task.title}</div>
-                  <div className="mt-1 text-xs text-slate-500">{`创建于 ${formatWorkspaceTime(task.createdAt)}`}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <span>{`创建于 ${formatWorkspaceTime(task.createdAt)}`}</span>
+                  </div>
                 </div>
               </div>
             </button>
