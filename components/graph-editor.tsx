@@ -2232,9 +2232,8 @@ export function GraphEditor() {
         });
       });
     },
-    onProcessingCompleted: (taskId) => {
+    onProcessingCompleted: () => {
       setIsDocumentImportDialogOpen(false);
-      void handleLoadTaskToCanvasRef.current(taskId);
     },
   });
 
@@ -4046,12 +4045,12 @@ export function GraphEditor() {
       </header>
 
       {status ? (
-        <div className="pointer-events-none fixed left-1/2 top-6 z-[140] w-fit max-w-[calc(100vw-3rem)] -translate-x-1/2">
+        <div className="pointer-events-none fixed left-1/2 top-1 z-[140] w-[calc(100vw-2rem)] max-w-xl -translate-x-1/2 sm:top-2">
           <div
             role="status"
             aria-live="polite"
             className={cn(
-              "pointer-events-auto flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm shadow-[0_18px_50px_-28px_rgba(15,23,42,0.35)] backdrop-blur",
+              "pointer-events-auto flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm shadow-xl ring-1 ring-black/5 backdrop-blur-md animate-in fade-in-0 slide-in-from-top-2 duration-200",
               getStatusTone(status) === "error"
                 ? "border-rose-200 bg-rose-50/95 text-rose-700"
                 : getStatusTone(status) === "success"
@@ -4061,7 +4060,7 @@ export function GraphEditor() {
           >
             <div
               className={cn(
-                "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full",
+                "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full",
                 getStatusTone(status) === "error"
                   ? "bg-rose-100 text-rose-600"
                   : getStatusTone(status) === "success"
@@ -4071,10 +4070,10 @@ export function GraphEditor() {
             >
               {getStatusTone(status) === "error" ? <X className="size-3.5" /> : <Check className="size-3.5" />}
             </div>
-            <div className="min-w-0 whitespace-nowrap leading-6">{status}</div>
+            <div className="min-w-0 flex-1 break-words pr-1 leading-6">{status}</div>
             <button
               type="button"
-              className="shrink-0 rounded-md p-1 text-current/70 transition hover:bg-black/5 hover:text-current"
+              className="mt-0.5 shrink-0 rounded-md p-1 text-current/70 transition hover:bg-black/5 hover:text-current focus:outline-none focus:ring-2 focus:ring-current/20"
               onClick={() => setStatus("")}
               aria-label="关闭提示"
             >
