@@ -139,6 +139,19 @@ export function normalizeGraphFileName(name: string | null | undefined, fallback
   return trimmed && trimmed.length > 0 ? trimmed : fallback;
 }
 
+export function sortRecordsByCreatedAtDesc<T extends { createdAt: string }>(records: T[]) {
+  return [...records].sort((left, right) => {
+    const leftTime = new Date(left.createdAt).getTime();
+    const rightTime = new Date(right.createdAt).getTime();
+
+    if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) {
+      return right.createdAt.localeCompare(left.createdAt);
+    }
+
+    return rightTime - leftTime;
+  });
+}
+
 export function createEmptyGraphDocument(): GraphDocument {
   return {
     nodes: [],

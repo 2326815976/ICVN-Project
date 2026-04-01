@@ -909,8 +909,65 @@ export function buildTaskResultFromGraphDocument(
   };
 }
 
+function getJsonErrorLocation(text: string, offset: number) {
+  const safeOffset = Math.max(0, Math.min(offset, text.length));
+  let line = 1;
+  let column = 1;
+
+  for (let index = 0; index < safeOffset; index += 1) {
+    if (text[index] === "\n") {
+      line += 1;
+      column = 1;
+      continue;
+    }
+
+    column += 1;
+  }
+
+  return { line, column };
+}
+
+function buildJsonSyntaxErrorMessage(text: string, error: unknown) {
+  const fallbackMessage = "JSON 格式错误，请检查引号、逗号和括号是否完整。";
+
+  if (!(error instanceof Error)) {
+    return fallbackMessage;
+  }
+
+  const lineColumnMatch = error.message.match(/line\s+(\d+)\s+column\s+(\d+)/i);
+  if (lineColumnMatch) {
+    const [, line, column] = lineColumnMatch;
+    return `JSON 格式错误：第 ${line} 行第 ${column} 列附近存在语法问题，请检查引号、逗号和括号是否完整。`;
+  }
+
+  const positionMatch = error.message.match(/position\s+(\d+)/i);
+  if (positionMatch) {
+    const [, position] = positionMatch;
+    const location = getJsonErrorLocation(text, Number(position));
+    return `JSON 格式错误：第 ${location.line} 行第 ${location.column} 列附近存在语法问题，请检查引号、逗号和括号是否完整。`;
+  }
+
+  return fallbackMessage;
+}
+
 export function parseGraphDocument(text: string): GraphDocument {
-  const parsed = JSON.parse(text) as Partial<GraphDocument> & {
+  if (!text.trim()) {
+    throw new Error("JSON 内容不能为空，请粘贴有效的关系图 JSON。");
+  }
+
+  let parsedValue: unknown;
+
+  try {
+    parsedValue = JSON.parse(text);
+  } catch (error: unknown) {
+    throw new Error(buildJsonSyntaxErrorMessage(text, error));
+  }
+
+  if (Array.isArray(parsedValue) || typeof parsedValue !== "object" || parsedValue === null) {
+    throw new Error("JSON 顶层结构无效，必须是对象，不能直接传数组、字符串或数字。");
+  }
+
+  const parsed = parsedValue as Partial<GraphDocument> & {
     nodes?: Array<{ [key: string]: unknown }>;
     edges?: Array<{ [key: string]: unknown }>;
   };
@@ -921,7 +978,21 @@ export function parseGraphDocument(text: string): GraphDocument {
   };
 
   if (!Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) {
-    throw new Error("导入格式无效，需要包含 nodes 和 edges 数组。");
+    throw new Error("JSON 结构无效：需要包含 nodes 和 edges 数组，或 data/result 下的 nodes 和 edges 数组。");
+  }
+
+  const invalidNodeIndex = payload.nodes.findIndex(
+    (node) => typeof node !== "object" || node === null || Array.isArray(node),
+  );
+  if (invalidNodeIndex >= 0) {
+    throw new Error(`JSON 结构无效：nodes 数组第 ${invalidNodeIndex + 1} 项必须是对象。`);
+  }
+
+  const invalidEdgeIndex = payload.edges.findIndex(
+    (edge) => typeof edge !== "object" || edge === null || Array.isArray(edge),
+  );
+  if (invalidEdgeIndex >= 0) {
+    throw new Error(`JSON 结构无效：edges 数组第 ${invalidEdgeIndex + 1} 项必须是对象。`);
   }
 
   const convertedGraph = convertEventNodesToEventEdges({
@@ -946,6 +1017,34 @@ export function parseGraphDocument(text: string): GraphDocument {
     edges: convertedGraph.edges.map(normalizeEdge),
     viewport: getSafeViewport("viewport" in payload ? payload : parsed),
   };
+}
+
+export function assertGraphDocumentCanBeImported(document: GraphDocument, sourceLabel = "\u5f53\u524d\u5173\u7cfb\u56fe") {
+  if (document.nodes.length === 0 && document.edges.length === 0) {
+    throw new Error(`${sourceLabel}\u4e3a\u7a7a\uff0c\u81f3\u5c11\u9700\u8981 1 \u4e2a\u8282\u70b9\u6216 1 \u6761\u8fde\u7ebf\u540e\u624d\u80fd\u5bfc\u5165\u753b\u5e03\u3002`);
+  }
+
+  const nodeIds = new Set(
+    document.nodes
+      .map((node) => (typeof node.id === "string" ? node.id.trim() : ""))
+      .filter((nodeId): nodeId is string => nodeId.length > 0),
+  );
+
+  const invalidEdge = document.edges.find(
+    (edge) => typeof edge.source !== "string" || !edge.source.trim() || typeof edge.target !== "string" || !edge.target.trim(),
+  );
+
+  if (invalidEdge) {
+    throw new Error(`${sourceLabel}\u4e2d\u5b58\u5728\u7f3a\u5c11 source \u6216 target \u7684\u8fde\u7ebf\uff0c\u65e0\u6cd5\u5bfc\u5165\u753b\u5e03\u3002`);
+  }
+
+  const danglingEdge = document.edges.find(
+    (edge) => !nodeIds.has(edge.source.trim()) || !nodeIds.has(edge.target.trim()),
+  );
+
+  if (danglingEdge) {
+    throw new Error(`${sourceLabel}\u4e2d\u5b58\u5728\u672a\u5173\u8054\u6709\u6548\u8282\u70b9\u7684\u8fde\u7ebf\uff0c\u65e0\u6cd5\u5bfc\u5165\u753b\u5e03\u3002`);
+  }
 }
 
 export function readFileAsDataUrl(file: File) {

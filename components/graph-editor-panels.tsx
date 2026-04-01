@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import type { Task, TaskSourceType } from "@/lib/domain/models";
 import { cn } from "@/lib/utils";
 
+import { sortRecordsByCreatedAtDesc } from "./graph-editor-config";
 import type { ShapeNodeKind } from "./graph/sample-graph";
 
 export type WorkspaceFileLike = {
@@ -690,16 +691,7 @@ export function TaskList({
     );
   }
 
-  const sortedTasks = [...tasks].sort((left, right) => {
-    const leftTime = new Date(left.createdAt).getTime();
-    const rightTime = new Date(right.createdAt).getTime();
-
-    if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) {
-      return right.createdAt.localeCompare(left.createdAt);
-    }
-
-    return rightTime - leftTime;
-  });
+  const sortedTasks = sortRecordsByCreatedAtDesc(tasks);
 
   return (
     <div className={cn("space-y-3", className)}>

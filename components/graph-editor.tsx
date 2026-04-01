@@ -31,7 +31,6 @@ import {
   Files,
   Image as ImageIcon,
   Pencil,
-  Plus,
   Redo2,
   RefreshCcw,
   Save,
@@ -86,6 +85,7 @@ import {
   replaceWorkspaceFile,
   segmentButtonClassName,
   shapeOptions,
+  sortRecordsByCreatedAtDesc,
   toolbarButtonClassName,
   type ExportSaveRequest,
   type ExportSaveTarget,
@@ -116,6 +116,7 @@ import {
   type ShapeNodeKind,
 } from "./graph/sample-graph";
 import {
+  assertGraphDocumentCanBeImported,
   buildTaskResultFromGraphDocument,
   clamp,
   isEditableTarget,
@@ -184,6 +185,27 @@ function createExportBackgroundCanvas(options: {
   return backgroundCanvas;
 }
 
+const CANVAS_LOAD_TIMEOUT_MS = 10000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = globalThis.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        globalThis.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 function hasStoredNodePositions(document: GraphDocument) {
   return (
     document.nodes.length > 0 &&
@@ -193,8 +215,16 @@ function hasStoredNodePositions(document: GraphDocument) {
   );
 }
 
+function isEmptyGraphDocument(document: GraphDocument) {
+  return document.nodes.length === 0 && document.edges.length === 0;
+}
+
+function isReusableDefaultWorkspaceFile(file: GraphWorkspaceFile) {
+  return !file.taskId && file.name === DEFAULT_FILE_NAME && isEmptyGraphDocument(file.document);
+}
+
 function getStatusTone(message: string) {
-  if (/(\u5931\u8d25|\u9519\u8bef|\u65e0\u6548|\u4e0d\u53ef\u7528|\u91cd\u8bd5|\u672a\u80fd|\u5f02\u5e38)/u.test(message)) {
+  if (/(\u5931\u8d25|\u9519\u8bef|\u65e0\u6548|\u4e0d\u53ef\u7528|\u91cd\u8bd5|\u672a\u80fd|\u5f02\u5e38|\u8d85\u65f6)/u.test(message)) {
     return "error" as const;
   }
 
@@ -270,6 +300,7 @@ export function GraphEditor() {
   const tasksRef = useRef<Task[]>([]);
   const pendingTaskTitleSyncRef = useRef(new Map<string, string>());
   const initialTaskAutoLoadRetryRef = useRef<string | null>(null);
+  const blockedAutoLoadTaskIdsRef = useRef(new Set<string>());
   const skipNextTitleBlurCommitRef = useRef<string | null>(null);
   const hasInitializedFromDatabaseRef = useRef(false);
   const [isFileDialogOpen, setIsFileDialogOpen] = useState(false);
@@ -497,13 +528,24 @@ export function GraphEditor() {
   );
 
   const persistToLocalStorage = useCallback(
-    (document: GraphDocument, options?: { announce?: string; syncImportText?: boolean }) => {
+    (document: GraphDocument, options?: { announce?: string; syncImportText?: boolean; targetFileId?: string }) => {
       try {
-        const normalizedName = normalizeGraphFileName(currentFileNameRef.current);
-        const { nextFiles } = syncCurrentFileSnapshot(document, { name: normalizedName });
-        const didPersist = writeWorkspaceToStorage(nextFiles, activeFileIdRef.current, options);
+        const targetFileId = typeof options?.targetFileId === "string" ? options.targetFileId.trim() : "";
+        const targetFile =
+          (targetFileId ? workspaceFilesRef.current.find((file) => file.id === targetFileId) : null) ??
+          workspaceFilesRef.current.find((file) => file.id === activeFileIdRef.current) ??
+          null;
+        const nextActiveFileId = activeFileIdRef.current;
+        const normalizedName = normalizeGraphFileName(targetFile?.name ?? currentFileNameRef.current);
+        const nextFile = buildCurrentFileRecord(document, {
+          name: normalizedName,
+          baseFile: targetFile,
+        });
+        const nextFiles = replaceWorkspaceFile(workspaceFilesRef.current, nextFile);
+        updateWorkspaceState(nextFiles, nextActiveFileId);
+        const didPersist = writeWorkspaceToStorage(nextFiles, nextActiveFileId, options);
 
-        if (options?.syncImportText) {
+        if (options?.syncImportText && nextFile.id === nextActiveFileId) {
           setImportText(stringifyGraphDocument(document));
         }
 
@@ -516,7 +558,7 @@ export function GraphEditor() {
         return false;
       }
     },
-    [syncCurrentFileSnapshot, writeWorkspaceToStorage],
+    [buildCurrentFileRecord, updateWorkspaceState, writeWorkspaceToStorage],
   );
 
   const syncSelectionState = useCallback(
@@ -610,7 +652,7 @@ export function GraphEditor() {
   }, []);
 
   const loadTaskList = useCallback(
-    async (options?: { highlightTaskId?: string; silent?: boolean }) => {
+    async (options?: { highlightTaskId?: string; silent?: boolean; preserveCurrentSelection?: boolean }) => {
       setIsTaskListLoading(true);
       if (!options?.silent) {
         setTaskListError(null);
@@ -621,21 +663,22 @@ export function GraphEditor() {
           page: 1,
           pageSize: 20,
         });
+        const nextTasks = sortRecordsByCreatedAtDesc(response.items);
 
-        setTasks(response.items);
+        setTasks(nextTasks);
         setTaskListError(null);
         setSelectedTaskId((current) => {
-          if (current && response.items.some((task) => task.id === current)) {
-            return current;
-          }
-
-          if (options?.highlightTaskId && response.items.some((task) => task.id === options.highlightTaskId)) {
+          if (options?.highlightTaskId && nextTasks.some((task) => task.id === options.highlightTaskId)) {
             return options.highlightTaskId;
           }
 
-          return response.items[0]?.id ?? null;
+          if (options?.preserveCurrentSelection !== false && current && nextTasks.some((task) => task.id === current)) {
+            return current;
+          }
+
+          return nextTasks[0]?.id ?? null;
         });
-      return response.items;
+        return nextTasks;
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "暂时无法获取任务列表。";
         setTaskListError(message);
@@ -698,6 +741,30 @@ export function GraphEditor() {
     [edges, nodes, viewport],
   );
 
+  const pruneRedundantDefaultWorkspaceFiles = useCallback(() => {
+    const currentFiles = workspaceFilesRef.current;
+
+    if (!currentFiles.some((file) => file.taskId)) {
+      return false;
+    }
+
+    const nextFiles = currentFiles.filter((file) => !isReusableDefaultWorkspaceFile(file));
+    if (nextFiles.length === currentFiles.length || nextFiles.length === 0) {
+      return false;
+    }
+
+    const nextActiveFileId = nextFiles.some((file) => file.id === activeFileIdRef.current)
+      ? activeFileIdRef.current
+      : nextFiles[0].id;
+    const nextActiveFile = nextFiles.find((file) => file.id === nextActiveFileId) ?? nextFiles[0];
+
+    updateWorkspaceState(nextFiles, nextActiveFileId);
+    setRenameDraft(nextActiveFile.name);
+    setRenamingFileId(null);
+    writeWorkspaceToStorage(nextFiles, nextActiveFileId);
+    return true;
+  }, [updateWorkspaceState, writeWorkspaceToStorage]);
+
   const ensureWorkspaceFileForTask = useCallback(
     (task: Task, options?: { switchToFile?: boolean }) => {
       const existingWorkspaceFile =
@@ -710,6 +777,16 @@ export function GraphEditor() {
             title: task.title,
             switchToFile: options?.switchToFile,
           }) ?? existingWorkspaceFile
+        );
+      }
+
+      const reusableWorkspaceFile = workspaceFilesRef.current.find(isReusableDefaultWorkspaceFile) ?? null;
+      if (reusableWorkspaceFile) {
+        return (
+          bindTaskToWorkspaceFile(reusableWorkspaceFile.id, task.id, {
+            title: task.title,
+            switchToFile: options?.switchToFile,
+          }) ?? reusableWorkspaceFile
         );
       }
 
@@ -938,7 +1015,7 @@ export function GraphEditor() {
     [applyViewport, clearSelection, setEdges, setNodes, updateHistoryState],
   );
 
-  const restoreWorkspaceFromLocalCache = useCallback(() => {
+  const restoreWorkspaceFromLocalCache = useCallback((options?: { applyCanvas?: boolean }) => {
     if (typeof window === "undefined") {
       return false;
     }
@@ -959,10 +1036,16 @@ export function GraphEditor() {
     const workspace = parseWorkspaceStorage(cached);
 
     if (workspace) {
-      const activeFile = workspace.files.find((file) => file.id === workspace.activeFileId) ?? workspace.files[0];
-      updateWorkspaceState(workspace.files, activeFile.id);
-      setRenameDraft(activeFile.name);
-      applyDocument(activeFile.document, "已恢复上次保存的本地工作区。", { resetHistory: true });
+      const initialFile = workspace.files[0];
+      updateWorkspaceState(workspace.files, initialFile.id);
+      setRenameDraft(initialFile.name);
+      setRenamingFileId(null);
+
+      if (options?.applyCanvas === false) {
+        return true;
+      }
+
+      applyDocument(initialFile.document, "已恢复第一个本地画布。", { resetHistory: true });
       return true;
     }
 
@@ -971,7 +1054,13 @@ export function GraphEditor() {
       const migratedFile = createWorkspaceFile({ name: DEFAULT_FILE_NAME, document });
       updateWorkspaceState([migratedFile], migratedFile.id);
       setRenameDraft(migratedFile.name);
+      setRenamingFileId(null);
       writeWorkspaceToStorage([migratedFile], migratedFile.id);
+
+      if (options?.applyCanvas === false) {
+        return true;
+      }
+
       applyDocument(document, "已恢复上次保存的本地画布。", { resetHistory: true });
       return true;
     } catch {
@@ -990,8 +1079,9 @@ export function GraphEditor() {
     }
 
     const snapshot = serializeDocument();
+    const targetFileId = activeFileIdRef.current;
     autoSaveTimeoutRef.current = window.setTimeout(() => {
-      persistToLocalStorage(snapshot);
+      persistToLocalStorage(snapshot, { targetFileId });
     }, 900);
 
     return () => {
@@ -1007,7 +1097,9 @@ export function GraphEditor() {
     }
 
     const handleBeforeUnload = () => {
-      persistToLocalStorage(serializeDocument());
+      persistToLocalStorage(serializeDocument(), {
+        targetFileId: activeFileIdRef.current,
+      });
     };
 
     window.addEventListener("beforeunload", handleBeforeUnload);
@@ -1512,24 +1604,26 @@ export function GraphEditor() {
       const optimisticUpdatedAt = new Date().toISOString();
 
       setTasks((current) =>
-        current.map((task) =>
-          task.id === taskId
-            ? {
-                ...task,
-                title: nextTitle,
-                updatedAt: optimisticUpdatedAt,
-              }
-            : task,
+        sortRecordsByCreatedAtDesc(
+          current.map((task) =>
+            task.id === taskId
+              ? {
+                  ...task,
+                  title: nextTitle,
+                  updatedAt: optimisticUpdatedAt,
+                }
+              : task,
+          ),
         ),
       );
 
       try {
         const updatedTask = await openApiClient.updateTask(taskId, { title: nextTitle });
-        setTasks((current) => current.map((task) => (task.id === taskId ? updatedTask : task)));
+        setTasks((current) => sortRecordsByCreatedAtDesc(current.map((task) => (task.id === taskId ? updatedTask : task))));
         void loadTaskList({ highlightTaskId: taskId, silent: true });
       } catch (error: unknown) {
         if (currentTask) {
-          setTasks((current) => current.map((task) => (task.id === taskId ? currentTask : task)));
+          setTasks((current) => sortRecordsByCreatedAtDesc(current.map((task) => (task.id === taskId ? currentTask : task))));
         }
 
         setStatus(
@@ -1611,7 +1705,7 @@ export function GraphEditor() {
         });
 
         bindTaskToWorkspaceFile(nextFile.id, task.id, { title: task.title });
-        setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+        setTasks((current) => sortRecordsByCreatedAtDesc([task, ...current.filter((item) => item.id !== task.id)]));
         setSelectedTaskId(task.id);
         void loadTaskList({ highlightTaskId: task.id, silent: true });
         setStatus(`已创建任务《${task.title}》，并切换到新的空白画布。`);
@@ -1996,7 +2090,11 @@ export function GraphEditor() {
       setStatus(messages.start);
 
       try {
-        const { document: nextDocument, didAutoLayout } = await prepareAutoLayoutDocument(document);
+        const { document: nextDocument, didAutoLayout } = await withTimeout(
+          prepareAutoLayoutDocument(document),
+          CANVAS_LOAD_TIMEOUT_MS,
+          "\u81ea\u52a8\u5e03\u5c40\u8d85\u65f6\uff0c\u5df2\u505c\u6b62\u672c\u6b21\u5e03\u5c40\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002",
+        );
         const nextStatus = didAutoLayout ? messages.success : messages.failure;
 
         applyDocument(nextDocument, nextStatus);
@@ -2055,14 +2153,19 @@ export function GraphEditor() {
         });
       });
     },
+    onProcessingCompleted: (taskId) => {
+      setIsDocumentImportDialogOpen(false);
+      void handleLoadTaskToCanvasRef.current(taskId);
+    },
   });
 
   const handleLoadTaskToCanvas = useCallback(
     async (taskId: string) => {
       if (loadingTaskIdRef.current) {
-        return;
+        return false;
       }
 
+      blockedAutoLoadTaskIdsRef.current.delete(taskId);
       loadingTaskIdRef.current = taskId;
       setLoadingTaskId(taskId);
       setSelectedTaskId(taskId);
@@ -2072,33 +2175,47 @@ export function GraphEditor() {
       });
 
       try {
-        const detail = await openApiClient.getTaskDetail(taskId);
+        const detail = await withTimeout(
+          openApiClient.getTaskDetail(taskId),
+          CANVAS_LOAD_TIMEOUT_MS,
+          "\u52a0\u8f7d\u4efb\u52a1\u8d85\u65f6\uff0c\u5df2\u505c\u6b62\u672c\u6b21\u753b\u5e03\u52a0\u8f7d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002",
+        );
         const targetTask = detail ?? tasksRef.current.find((task) => task.id === taskId) ?? null;
         const localWorkspaceFile = targetTask ? ensureWorkspaceFileForTask(targetTask, { switchToFile: true }) : null;
+        const taskTitle = targetTask?.title ?? taskId;
+        const applyLocalWorkspaceFallback = (message: string) => {
+          if (localWorkspaceFile) {
+            applyDocument(localWorkspaceFile.document, message, {
+              resetHistory: true,
+            });
+            return true;
+          }
+
+          setStatus(message);
+          return false;
+        };
 
         if (targetTask?.status === "failed") {
-          setStatus(targetTask.errorMessage || `加载任务 ${targetTask.title} 失败，请稍后重试。`);
+          setStatus(targetTask.errorMessage || `\u52a0\u8f7d\u4efb\u52a1 ${targetTask.title} \u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002`);
           void loadTaskList({ highlightTaskId: taskId, silent: true });
-          return;
+          return false;
         }
 
         if (targetTask && !["validated", "applied"].includes(targetTask.status)) {
-          if (localWorkspaceFile) {
-            applyDocument(localWorkspaceFile.document, `已切换到任务 ${targetTask.title} 的本地画布。`, {
-              resetHistory: true,
-            });
-          } else {
-            setStatus(`任务 ${targetTask.title} 暂无可加载的关系图。`);
-          }
+          const didFallback = applyLocalWorkspaceFallback(`\u5df2\u5207\u6362\u5230\u4efb\u52a1 ${targetTask.title} \u7684\u672c\u5730\u753b\u5e03\u3002`);
           void loadTaskList({ highlightTaskId: taskId, silent: true });
-          return;
+          return didFallback;
         }
 
-        const result = await openApiClient.getTaskResult(taskId);
-        if (!result.result?.nodes || !result.result?.edges) {
-          setStatus("当前任务暂无可用的关系图结果。");
+        const result = await withTimeout(
+          openApiClient.getTaskResult(taskId),
+          CANVAS_LOAD_TIMEOUT_MS,
+          `\u52a0\u8f7d\u4efb\u52a1\u300a${taskTitle}\u300b\u8d85\u65f6\uff0c\u5df2\u505c\u6b62\u672c\u6b21\u753b\u5e03\u52a0\u8f7d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002`,
+        );
+        if (!Array.isArray(result.result?.nodes) || !Array.isArray(result.result?.edges)) {
+          const didFallback = applyLocalWorkspaceFallback(`\u4efb\u52a1\u300a${taskTitle}\u300b\u6682\u65e0\u53ef\u52a0\u8f7d\u7684\u5173\u7cfb\u56fe\u7ed3\u679c\u3002`);
           void loadTaskList({ highlightTaskId: taskId, silent: true });
-          return;
+          return didFallback;
         }
 
         const importedDocument = parseGraphDocument(
@@ -2106,10 +2223,10 @@ export function GraphEditor() {
             data: result.result,
           }),
         );
+        assertGraphDocumentCanBeImported(importedDocument, `\u4efb\u52a1\u300a${taskTitle}\u300b\u7684\u5173\u7cfb\u56fe\u7ed3\u679c`);
 
-        const taskTitle = targetTask?.title ?? taskId;
         if (hasStoredNodePositions(importedDocument)) {
-          applyDocument(importedDocument, `已加载 ${taskTitle} 的关系图。`, {
+          applyDocument(importedDocument, `\u5df2\u52a0\u8f7d ${taskTitle} \u7684\u5173\u7cfb\u56fe\u3002`, {
             resetHistory: true,
           });
 
@@ -2125,40 +2242,88 @@ export function GraphEditor() {
             pendingViewportFitRef.current = { duration: 320, padding: 0.2, syncImportText: true };
           }
         } else {
-          await runAutoLayout(importedDocument, {
-            start: `正在加载 ${taskTitle} 的关系图...`,
-            success: `已加载 ${taskTitle} 的关系图。`,
-            failure: `加载 ${taskTitle} 失败，已保留当前画布。`,
-          });
-        }
-        void loadTaskList({ highlightTaskId: taskId, silent: true });
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : "加载任务失败，请稍后重试。";
-        if (message.includes("Task result is not ready")) {
-          const targetTask = tasksRef.current.find((task) => task.id === taskId) ?? null;
-          const localWorkspaceFile = targetTask ? ensureWorkspaceFileForTask(targetTask, { switchToFile: true }) : null;
+          setIsImportingLayout(true);
+          setStatus(`\u6b63\u5728\u52a0\u8f7d ${taskTitle} \u7684\u5173\u7cfb\u56fe...`);
 
+          try {
+            const prepared = await withTimeout(
+              prepareAutoLayoutDocument(importedDocument),
+              CANVAS_LOAD_TIMEOUT_MS,
+              `\u52a0\u8f7d\u4efb\u52a1\u300a${taskTitle}\u300b\u8d85\u65f6\uff0c\u5df2\u505c\u6b62\u672c\u6b21\u753b\u5e03\u52a0\u8f7d\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002`,
+            );
+            const nextStatus = prepared.didAutoLayout
+              ? `\u5df2\u52a0\u8f7d ${taskTitle} \u7684\u5173\u7cfb\u56fe\u3002`
+              : `\u52a0\u8f7d ${taskTitle} \u5931\u8d25\uff0c\u5df2\u4fdd\u7559\u5f53\u524d\u753b\u5e03\u3002`;
+
+            applyDocument(prepared.document, nextStatus);
+            let finalDocument = prepared.document;
+            const nextViewport = await fitViewportToScene({ duration: 320, padding: 0.2 });
+            if (nextViewport) {
+              finalDocument = {
+                ...prepared.document,
+                viewport: nextViewport,
+              };
+              setImportText(stringifyGraphDocument(finalDocument));
+            } else if (prepared.document.nodes.length > 0 || prepared.document.edges.length > 0) {
+              pendingViewportFitRef.current = { duration: 320, padding: 0.2, syncImportText: true };
+            }
+          } finally {
+            setIsImportingLayout(false);
+          }
+        }
+
+        blockedAutoLoadTaskIdsRef.current.delete(taskId);
+        void loadTaskList({ highlightTaskId: taskId, silent: true });
+        return true;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "\u52a0\u8f7d\u4efb\u52a1\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+        const targetTask = tasksRef.current.find((task) => task.id === taskId) ?? null;
+        const localWorkspaceFile = targetTask ? ensureWorkspaceFileForTask(targetTask, { switchToFile: true }) : null;
+
+        if (message.includes("Task result is not ready")) {
           if (localWorkspaceFile) {
-            applyDocument(localWorkspaceFile.document, `已切换到任务 ${targetTask?.title ?? taskId} 的本地画布。`, {
+            applyDocument(localWorkspaceFile.document, `\u5df2\u5207\u6362\u5230\u4efb\u52a1 ${targetTask?.title ?? taskId} \u7684\u672c\u5730\u753b\u5e03\u3002`, {
               resetHistory: true,
             });
-          } else {
-            setStatus(
-              targetTask
-                ? `任务 ${targetTask.title} 暂无可加载的关系图。`
-                : "当前任务暂无可加载的关系图。",
-            );
+            void loadTaskList({ highlightTaskId: taskId, silent: true });
+            return true;
           }
+
+          setStatus(
+            targetTask
+              ? `\u4efb\u52a1 ${targetTask.title} \u6682\u65e0\u53ef\u52a0\u8f7d\u7684\u5173\u7cfb\u56fe\u3002`
+              : "\u5f53\u524d\u4efb\u52a1\u6682\u65e0\u53ef\u52a0\u8f7d\u7684\u5173\u7cfb\u56fe\u3002",
+          );
+          void loadTaskList({ highlightTaskId: taskId, silent: true });
+          return false;
+        }
+
+        blockedAutoLoadTaskIdsRef.current.add(taskId);
+
+        if (localWorkspaceFile && /(\u4e0d\u7b26\u5408\u5bfc\u5165\u89c4\u8303|\u8d85\u65f6)/u.test(message)) {
+          applyDocument(localWorkspaceFile.document, `${message} \u5df2\u5207\u6362\u5230\u4efb\u52a1\u300a${targetTask?.title ?? taskId}\u300b\u7684\u672c\u5730\u753b\u5e03\u3002`, {
+            resetHistory: true,
+          });
         } else {
           setStatus(message);
         }
+
         void loadTaskList({ highlightTaskId: taskId, silent: true });
+        return false;
       } finally {
         loadingTaskIdRef.current = null;
         setLoadingTaskId(null);
       }
     },
-    [applyDocument, ensureWorkspaceFileForTask, fitViewportToScene, loadTaskList, runAutoLayout, serializeDocument, syncCurrentFileSnapshot],
+    [
+      applyDocument,
+      ensureWorkspaceFileForTask,
+      fitViewportToScene,
+      loadTaskList,
+      prepareAutoLayoutDocument,
+      serializeDocument,
+      syncCurrentFileSnapshot,
+    ],
   );
   const handleLoadTaskToCanvasRef = useRef(handleLoadTaskToCanvas);
   useEffect(() => {
@@ -2184,23 +2349,61 @@ export function GraphEditor() {
     let cancelled = false;
 
     const initializeCanvas = async () => {
-      let firstTask: Task | null = null;
       let hasLoadedInitialCanvas = false;
+      let shouldRestoreLocalCanvas = true;
+
+      const loadFirstTaskWorkspace = (task: Task) => {
+        restoreWorkspaceFromLocalCacheRef.current({ applyCanvas: false });
+        const initialWorkspaceFile = ensureWorkspaceFileForTaskRef.current(task, { switchToFile: true });
+
+        if (!initialWorkspaceFile) {
+          return;
+        }
+
+        applyDocumentRef.current(initialWorkspaceFile.document, `已切换到任务《${task.title}》的本地画布。`, {
+          resetHistory: true,
+        });
+        setSelectedTaskId(task.id);
+        hasLoadedInitialCanvas = true;
+      };
 
       try {
-        const taskItems = await loadTaskList({ silent: true });
+        const taskItems = await withTimeout(
+          loadTaskList({ silent: true, preserveCurrentSelection: false }),
+          CANVAS_LOAD_TIMEOUT_MS,
+          "初始化任务列表超时，已恢复本地画布。",
+        );
         if (cancelled) {
           return;
         }
 
-        firstTask = taskItems[0] ?? null;
-        if (firstTask && ["validated", "applied"].includes(firstTask.status)) {
-          await handleLoadTaskToCanvasRef.current(firstTask.id);
-          hasLoadedInitialCanvas = true;
+        const firstTask = taskItems[0] ?? null;
+        if (firstTask) {
+          pruneRedundantDefaultWorkspaceFiles();
+          shouldRestoreLocalCanvas = false;
+          setSelectedTaskId(firstTask.id);
+
+          if (["validated", "applied"].includes(firstTask.status)) {
+            const didLoadInitialTask = await handleLoadTaskToCanvasRef.current(firstTask.id);
+            if (didLoadInitialTask) {
+              hasLoadedInitialCanvas = true;
+              return;
+            }
+          }
+
+          if (cancelled) {
+            return;
+          }
+
+          loadFirstTaskWorkspace(firstTask);
           return;
         }
 
-        const graphView = await openApiClient.getGraphView(BACKEND_GRAPH_ID);
+        const graphView = await withTimeout(
+          openApiClient.getGraphView(BACKEND_GRAPH_ID),
+          CANVAS_LOAD_TIMEOUT_MS,
+          "从数据库加载画布超时，已恢复本地画布。",
+        );
         if (cancelled) {
           return;
         }
@@ -2211,32 +2414,22 @@ export function GraphEditor() {
               data: graphView,
             }),
           );
+          assertGraphDocumentCanBeImported(importedDocument, "数据库中的关系图");
           const { nextFile, nextFiles } = syncCurrentFileSnapshot(importedDocument, {
             name: normalizeGraphFileName(currentFileNameRef.current),
           });
           writeWorkspaceToStorage(nextFiles, nextFile.id);
           applyDocumentRef.current(importedDocument, "已从数据库加载实际关系图。", { resetHistory: true });
           hasLoadedInitialCanvas = true;
-          return;
+          shouldRestoreLocalCanvas = false;
         }
       } catch (error: unknown) {
         if (!cancelled) {
           setStatus(error instanceof Error ? error.message : "从数据库加载关系图失败，请稍后重试。");
         }
       } finally {
-        if (!cancelled && !hasLoadedInitialCanvas) {
-          const restored = restoreWorkspaceFromLocalCacheRef.current();
-
-          if (restored && firstTask) {
-            const initialWorkspaceFile = ensureWorkspaceFileForTaskRef.current(firstTask, { switchToFile: true });
-
-            if (initialWorkspaceFile) {
-              applyDocumentRef.current(initialWorkspaceFile.document, `已切换到任务《${firstTask.title}》的本地画布。`, {
-                resetHistory: true,
-              });
-              setSelectedTaskId(firstTask.id);
-            }
-          }
+        if (!cancelled && !hasLoadedInitialCanvas && shouldRestoreLocalCanvas) {
+          restoreWorkspaceFromLocalCacheRef.current();
         }
 
         if (!cancelled) {
@@ -2252,12 +2445,18 @@ export function GraphEditor() {
     };
   }, [
     loadTaskList,
+    pruneRedundantDefaultWorkspaceFiles,
     syncCurrentFileSnapshot,
+    updateWorkspaceState,
     writeWorkspaceToStorage,
   ]);
 
   useEffect(() => {
     if (!hasCompletedInitialLoad || !flowInstance || !selectedTaskId) {
+      return;
+    }
+
+    if (blockedAutoLoadTaskIdsRef.current.has(selectedTaskId)) {
       return;
     }
 
@@ -2353,7 +2552,7 @@ export function GraphEditor() {
       try {
         await openApiClient.deleteTask(task.id);
         tasksRef.current = remainingTasks;
-        setTasks(remainingTasks);
+        setTasks(sortRecordsByCreatedAtDesc(remainingTasks));
         setSelectedTaskId((current) => (current === task.id ? nextSelectedTaskId : current));
 
         if (wasSelectedTask && nextSelectedTaskId) {
@@ -2386,14 +2585,16 @@ export function GraphEditor() {
       const linkedWorkspaceFile = previousWorkspaceFiles.find((file) => file.taskId === task.id) ?? null;
 
       setTasks((current) =>
-        current.map((item) =>
-          item.id === task.id
-            ? {
-                ...item,
-                title: normalizedName,
-                updatedAt: optimisticUpdatedAt,
-              }
-            : item,
+        sortRecordsByCreatedAtDesc(
+          current.map((item) =>
+            item.id === task.id
+              ? {
+                  ...item,
+                  title: normalizedName,
+                  updatedAt: optimisticUpdatedAt,
+                }
+              : item,
+          ),
         ),
       );
 
@@ -2423,7 +2624,7 @@ export function GraphEditor() {
 
       try {
         const updatedTask = await openApiClient.updateTask(task.id, { title: normalizedName });
-        setTasks((current) => current.map((item) => (item.id === task.id ? updatedTask : item)));
+        setTasks((current) => sortRecordsByCreatedAtDesc(current.map((item) => (item.id === task.id ? updatedTask : item))));
 
         if (linkedWorkspaceFile) {
           const syncedFiles = workspaceFilesRef.current.map((file) =>
@@ -2443,7 +2644,7 @@ export function GraphEditor() {
         setStatus(`任务《${task.title}》已重命名为《${normalizedName}》。`);
         void loadTaskList({ highlightTaskId: task.id, silent: true });
       } catch (error: unknown) {
-        setTasks((current) => current.map((item) => (item.id === task.id ? task : item)));
+        setTasks((current) => sortRecordsByCreatedAtDesc(current.map((item) => (item.id === task.id ? task : item))));
 
         if (linkedWorkspaceFile) {
           updateWorkspaceState(previousWorkspaceFiles, activeFileIdRef.current);
@@ -2500,15 +2701,6 @@ export function GraphEditor() {
     setIsDocumentImportDialogOpen(false);
   }, [isDocumentProcessing, setIsDocumentDragActive]);
 
-  const handleOpenJsonImportFromDocumentDialog = useCallback(() => {
-    if (isDocumentProcessing) {
-      return;
-    }
-
-    setIsDocumentImportDialogOpen(false);
-    setIsImportDialogOpen(true);
-  }, [isDocumentProcessing]);
-
   const handleOpenJsonImportDialog = useCallback(() => {
     setIsImportDialogOpen(true);
   }, []);
@@ -2520,6 +2712,7 @@ export function GraphEditor() {
 
     try {
       const document = parseGraphDocument(importText);
+      assertGraphDocumentCanBeImported(document, "\u5bfc\u5165 JSON");
       setIsImportingLayout(true);
       setStatus("JSON 解析成功，正在自动整理布局...");
 
@@ -2527,7 +2720,11 @@ export function GraphEditor() {
       let didAutoLayout = true;
 
       try {
-        const prepared = await prepareAutoLayoutDocument(document);
+        const prepared = await withTimeout(
+          prepareAutoLayoutDocument(document),
+          CANVAS_LOAD_TIMEOUT_MS,
+          "\u5bfc\u5165\u5e03\u5c40\u8d85\u65f6\uff0c\u8bf7\u68c0\u67e5 JSON \u5185\u5bb9\u540e\u91cd\u8bd5\u3002",
+        );
         persistedDocument = prepared.document;
         didAutoLayout = prepared.didAutoLayout;
       } finally {
@@ -2550,7 +2747,7 @@ export function GraphEditor() {
             title: task.title,
             switchToFile: true,
           });
-          setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+          setTasks((current) => sortRecordsByCreatedAtDesc([task, ...current.filter((item) => item.id !== task.id)]));
           taskId = task.id;
         }
 
@@ -2597,7 +2794,7 @@ export function GraphEditor() {
       setStatus(
         error instanceof Error
           ? error.message
-          : "导入失败，请检查 JSON 结构。支持 nodes + edges、data.nodes + data.edges、result.nodes + result.edges 以及 AI 原始结果。",
+          : "\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 JSON \u7ed3\u6784\u3002\u652f\u6301 nodes + edges\u3001data.nodes + data.edges\u3001result.nodes + result.edges \u4ee5\u53ca AI \u539f\u59cb\u7ed3\u679c\u3002",
       );
       setIsImportingLayout(false);
     }
@@ -2766,6 +2963,11 @@ export function GraphEditor() {
       return;
     }
 
+    if (isCanvasEmpty) {
+      setStatus("当前画布为空，暂不支持保存到数据库。");
+      return;
+    }
+
     const graphDocument = serializeDocument();
     persistToLocalStorage(graphDocument, {
       syncImportText: true,
@@ -2787,7 +2989,7 @@ export function GraphEditor() {
           title: task.title,
           switchToFile: true,
         });
-        setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+        setTasks((current) => sortRecordsByCreatedAtDesc([task, ...current.filter((item) => item.id !== task.id)]));
         taskId = task.id;
       }
 
@@ -2809,6 +3011,7 @@ export function GraphEditor() {
   }, [
     activeWorkspaceFile,
     bindTaskToWorkspaceFile,
+    isCanvasEmpty,
     isSavingToDatabase,
     loadTaskList,
     persistToLocalStorage,
@@ -3696,8 +3899,8 @@ export function GraphEditor() {
             variant="outline"
             className={toolbarButtonClassName}
             onClick={() => void handleSaveToDatabase()}
-            disabled={isSavingToDatabase}
-            title="保存当前关系图 JSON 到数据库"
+            disabled={isSavingToDatabase || isCanvasEmpty}
+            title={isCanvasEmpty ? "空白画布暂不支持保存到数据库" : "保存当前关系图 JSON 到数据库"}
             aria-label="保存到数据库"
           >
             <Save className="size-4" />
@@ -3764,12 +3967,12 @@ export function GraphEditor() {
       </header>
 
       {status ? (
-        <div className="pointer-events-none fixed right-6 top-6 z-[140] max-w-md">
+        <div className="pointer-events-none fixed right-6 top-6 z-[140] w-fit max-w-[calc(100vw-3rem)]">
           <div
             role="status"
             aria-live="polite"
             className={cn(
-              "pointer-events-auto flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm shadow-[0_18px_50px_-28px_rgba(15,23,42,0.35)] backdrop-blur",
+              "pointer-events-auto flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm shadow-[0_18px_50px_-28px_rgba(15,23,42,0.35)] backdrop-blur",
               getStatusTone(status) === "error"
                 ? "border-rose-200 bg-rose-50/95 text-rose-700"
                 : getStatusTone(status) === "success"
@@ -3789,12 +3992,12 @@ export function GraphEditor() {
             >
               {getStatusTone(status) === "error" ? <X className="size-3.5" /> : <Check className="size-3.5" />}
             </div>
-            <div className="min-w-0 flex-1 leading-6">{status}</div>
+            <div className="min-w-0 whitespace-nowrap leading-6">{status}</div>
             <button
               type="button"
               className="shrink-0 rounded-md p-1 text-current/70 transition hover:bg-black/5 hover:text-current"
               onClick={() => setStatus("")}
-              aria-label="????"
+              aria-label="关闭提示"
             >
               <X className="size-3.5" />
             </button>
@@ -3843,12 +4046,6 @@ export function GraphEditor() {
                     <div className="min-w-0 flex-1 text-left text-xs font-medium uppercase tracking-[0.2em] text-slate-400">
                       任务列表（{tasks.length}）
                     </div>
-                    <NewFileMenuButton
-                      iconOnly
-                      buttonClassName="size-8 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-                      onCreateCanvas={handleCreateCanvas}
-                      onImportDocument={handleOpenDocumentImportDialog}
-                    />
                     <Tooltip content={selectedTaskId ? "重命名当前任务" : "请先选中任务"} placement="bottom">
                       <Button
                         type="button"
@@ -4609,16 +4806,6 @@ export function GraphEditor() {
                     type="button"
                     variant="outline"
                     className="border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                    onClick={handleTriggerDocumentUpload}
-                    disabled={isDocumentProcessing}
-                  >
-                    <Plus className="size-4" />
-                    {"选择文件"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                     onClick={handleCloseDocumentImportDialog}
                     disabled={isDocumentProcessing}
                   >
@@ -4629,7 +4816,7 @@ export function GraphEditor() {
               </div>
             </div>
 
-            <div className="grid min-h-0 flex-1 gap-4 overflow-hidden px-6 py-5 lg:grid-cols-[minmax(0,1.6fr)_360px]">
+            <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-6 py-5">
               <div className="flex min-h-0 flex-col gap-4 overflow-hidden">
                 <input
                   ref={documentImportInputRef}
@@ -4778,32 +4965,6 @@ export function GraphEditor() {
                 )}
               </div>
 
-              <div className="flex min-h-0 flex-col gap-4">
-                <div className="rounded-[28px] border border-slate-200 bg-white p-5">
-                  <div className="text-sm font-semibold text-slate-900">{"快捷操作"}</div>
-                  <div className="mt-4 flex flex-col gap-2">
-                    <Button
-                      type="button"
-                      className="bg-sky-600 text-white hover:bg-sky-700"
-                      onClick={handleOpenJsonImportFromDocumentDialog}
-                      disabled={isDocumentProcessing}
-                    >
-                      <FileJson className="size-4" />
-                      {"打开 JSON 导入"}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                      onClick={handleCreateCanvas}
-                      disabled={isDocumentProcessing}
-                    >
-                      <Plus className="size-4" />
-                      {"新建任务"}
-                    </Button>
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -4859,7 +5020,7 @@ export function GraphEditor() {
 
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-xs leading-5 text-slate-400">
-                  {"支持 `nodes + edges`、`data.nodes + data.edges` 以及任务结果结构；快捷键 `Ctrl/Cmd + Enter` 可直接导入。"}
+                  {"\u652f\u6301 `nodes + edges`\u3001`data.nodes + data.edges` \u4ee5\u53ca\u4efb\u52a1\u7ed3\u679c\u7ed3\u6784\uff1b\u7a7a\u7684 `nodes/edges` \u753b\u5e03\u4e0d\u4f1a\u5bfc\u5165\uff1b\u5feb\u6377\u952e `Ctrl/Cmd + Enter` \u53ef\u76f4\u63a5\u5bfc\u5165\u3002"}
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
